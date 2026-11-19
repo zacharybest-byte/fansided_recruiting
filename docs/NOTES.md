@@ -1,128 +1,41 @@
-# v1 build notes: stubs, interpretations and test coverage
+# Build notes
 
-## 1.1.0 (fixes from independent QA)
+## 2.0.0 (Vercel + Turso + password sign-in)
 
-Tests for these are in `test/qa-fixes.test.js`.
+Contract: `docs/SCOPE-V2.md`. Spec and acceptance checks: `docs/SPEC.md` (AC-36 to AC-60 are new).
 
-- **Ids are never reused (major).** Migration 3 rebuilds `people`, `applications`,
-  `application_events`, `notes`, `email_templates`, `emails_sent` and `deletion_log`
-  with `INTEGER PRIMARY KEY AUTOINCREMENT`, keeping all data, foreign keys, indexes and
-  the append-only trigger. Migrations now run with foreign keys off and are checked with
-  `PRAGMA foreign_key_check` before each commits. Before this, deleting the newest
-  candidate let the next applicant take the same ids, so old notification links and
-  `deletion_log.deleted_person_id` could point at a different live person.
-- **Notes and emails keep their role.** Migration 3 also adds `notes.role_id` and
-  `emails_sent.role_id`, filled at write time (existing rows are backfilled from the
-  application's role at migration time). The candidate page tags notes and emails with
-  that role, not the application's current role.
-- **Apply form:**
-  - `GET /roles/:id/apply`, which happens when someone reloads a page that showed
-    validation errors, now redirects to the role page instead of returning 405.
-  - The form posts to `…/apply#apply`, and the error summary (`#error-summary`) gets
-    keyboard focus.
-  - The form carries a fingerprint of the questionnaire (`qv`). If an admin changed the
-    questions after the form was opened, the submission is not stored. The form comes
-    back with the current questions and the message "questions changed, please review"
-    (HTTP 409). The other fields are kept; answers are cleared.
-- **Rate limit:** only stored applications and honeypot hits count towards 10 per IP per
-  hour. Invalid submissions and CSRF failures no longer use up an applicant's quota.
-- **Reassign rep:** the select has a "Choose…" option. It is pre-selected when the role
-  has no active rep, and a choice is required.
-- **Layout:** tables scroll sideways on small screens (`.table-wrap`), long unbroken text
-  wraps, pipeline stage tables share column widths, and Users admin forms no longer wrap
-  awkwardly.
-- **Users admin:** admins can edit any user's display name, which matters because bootstrap
-  admins start with none. Deactivate asks for confirmation with JS, as well as showing
-  the server-side warning when the user still has roles.
-- **Pipeline → Onboarded:** a move to Onboarded from a pipeline row (which has no Voltax
-  fields) redirects to the candidate page's Voltax form (`#voltax`).
-- **Logs:** notification and email log lines carry application and user ids only, never
-  applicant names or emails. The exception is EMAIL_MODE=log outside production, which
-  prints notification subjects for local debugging. Refused sign-ins no longer log the
-  email address. The README has a new *Data retention* section listing the copies that
-  outlive *Delete candidate* (DB snapshots, reps' Gmail, container logs, `dev_mail_log`)
-  and how to purge each.
-- **Ops:**
-  - `npm start`, `npm run dev` and `npm run seed` load `.env` if present
-    (`--env-file-if-exists`, verified on Node 22.23).
-  - The VM deploy now uses a systemd unit (`deploy/fansided-recruit.service`) with
-    `RequiresMountsFor` plus a marker-file condition, so the app never starts on an
-    empty disk. The unit replaces `--restart=always` and sets Docker log rotation
-    (5 × 10 MB).
-  - Images are tagged with the git SHA and `current`; the README documents rollback.
-  - Backups use `deploy/backup-to-gcs.sh` (`set -euo pipefail`, logs every step, a
-    `$BUCKET` variable, a disk check, and an uploads mirror that removes deleted files).
-    The lifecycle rule only applies to `db/`. The README adds the IAM binding for the
-    VM's service account, the note that the *Internal* OAuth audience needs the project
-    to be in the Workspace org, and the Workspace *API controls → Trusted* step.
+### Removed
+- Google OAuth sign-in, Gmail API sending, refresh tokens and `TOKEN_ENCRYPTION_KEY`, `dev_mail_log`, `DEV_LOGIN`, `EMAIL_MODE`.
+- Resume file upload, the multipart parser, file routes and the uploads directory.
+- The notification email. Dockerfile, `.dockerignore`, `deploy/`, `scripts/backup.js`, `scripts/seed.js`.
+- Config variables `DATA_DIR`, `TRUST_PROXY`, `QUIET`, `ADMIN_EMAILS`, `ALLOWED_DOMAIN`, `MAX_UPLOAD_MB`, `APP_TIMEZONE` and the rest of the v1 list.
 
-## 1.0.0 (first build)
+### Replaced
+- Database: an async interface (`all/get/run/batch/close`) with two drivers. `node:sqlite` (local and tests) and Turso over `fetch` to `/v2/pipeline` (stateless, every pipeline ends with `close`). No interactive transactions: every multi-statement write is one `db.batch`, and read-then-write rules live in the SQL (`WHERE` guards).
+- Sign-in: email + scrypt password; invite and reset links (single use, hashed in the DB); first admin via `/setup?token=`. Sessions, CSRF values, rate limits and "last visit" are in the DB or signed with `SESSION_SECRET`. Nothing relies on process memory.
+- Hosting: `api/index.js` + `vercel.json` (one rewrite to the function). `src/server.js` is only the local wrapper.
+- Email: "Open in Gmail" / "Open in mail app" compose links, logged as "opened", not "sent".
+- Alerts: New counts on the dashboard and an optional webhook (role title + link only).
 
-## 1.0.0 (first build)
+### Added
+- `/app/account` (change own password), admin Sample data page (`src/lib/sample.js`), security headers on every response (CSP with no inline code, XFO, nosniff, no-referrer, HSTS in production), https-only links.
 
-Everything in `docs/SPEC.md` is implemented. This file lists what is stubbed, where the
-spec left room and a choice was made, and which acceptance checks are not fully automated.
+### Decisions
+- **Fresh baseline schema.** Migration 1 is the whole v2 schema (with `is_sample`, `resume_url`, `auth_tokens`, `rate_limits`). A v1 SQLite file is not migrated: v1 never ran in production. `users` and `job_roles` use `AUTOINCREMENT` so ids are never reused.
+- **Hand-off page instead of a redirect** for email compose. A POST that answers with a cross-origin redirect (to mail.google.com or `mailto:`) can be blocked by the form-action CSP and by browsers; a small page with a normal link, followed by `public/app.js`, always works and still works without JS.
+- **https-only links** for LinkedIn, resume and samples; stored non-https values are never rendered as links.
+- **Config trimmed** to the seven settings. Base URL falls back to Vercel's variables; in production with none of them it is empty and invite pages say to prefix the site address.
+- **Rate-limit keys are HMACs** (`SESSION_SECRET`) of bucket + IP or email, so the table holds neither.
+- **Client IP.** On Vercel the `x-vercel-forwarded-for` header is used. Vercel's request-header docs say it holds the client's public IP, is identical to `x-forwarded-for`, is not overwritten by a proxy placed in front, and that external forwarded IPs are not forwarded. Locally the socket address is used. (B's first draft read `x-forwarded-for`; changed.)
+- **Assets** are always requested as `/public/style.css` and `/public/app.js` and served by the function (with the headers). With the "Other" preset and a `public/` directory, Vercel's output directory is `public` and only its contents are static, so `src/` and `docs/` are not exposed; `/style.css` and `/app.js` may also be CDN-served, and `vercel.json` adds the headers for exactly those two paths.
+- **Request body.** Vercel adds a lazy `req.body`. The reader uses the stream, and rebuilds the urlencoded form from `req.body` (Buffer, string or object) if the stream is already finished or empty. The 512 KB cap and the content-type check apply either way. The documented alternative (env var `NODEJS_HELPERS=0`) is not needed.
 
-### Stubbed or not reachable from the build sandbox
+### Not tested on real infrastructure
+Vercel deployment details (rewrite, `includeFiles`, `req.url` after the rewrite, CDN asset headers, client-IP header, cold start with scrypt), the real Turso API (`batch` conditions, error shapes, auth, URL rewrite, foreign keys, injected variable names), Gmail compose URLs with very long bodies, webhook acceptance by Google Chat/Slack, platform logs recording `?token=` query strings. See the README.
 
-- **Voltax.** `src/voltax.js` exports `createUser()`, which returns
-  `{ status: "not_configured" }` and does nothing else. It is called on every move to
-  Onboarded. Reps always enter the Voltax user ID by hand. When Stephen provides API
-  access, only this file changes.
-- **Google (OIDC sign-in and Gmail send).** This is implemented for real in
-  `src/lib/google.js` against Google's documented endpoints:
-  - `accounts.google.com/o/oauth2/v2/auth`
-  - `oauth2.googleapis.com/token`, for the code exchange and refresh-token grants
-  - `openidconnect.googleapis.com/v1/userinfo`
-  - `gmail.googleapis.com/gmail/v1/users/me/messages/send`, with a base64url RFC 2822
-    message
+### Test coverage notes
+`test/vercel.test.js`: AC-41, AC-56 (table-driven over pages, redirects, 403/404/405/413/415/500, config-error 500, static GET/HEAD, development and production), AC-60, AC-36 check, env/removed-file hygiene. The suite runs every integration file on both drivers.
 
-  The build sandbox had no network, so this code has **not been run against real
-  Google**. The tests drive the real code path end to end through an injected fake of
-  those endpoints (`test/fake-google.js`). Do one manual sign-in and one send on staging
-  before go-live.
-- **Development switches.** These are not in the spec:
-  - `DEV_LOGIN=1` lets you sign in as any active, allowlisted user without Google. It
-    still applies the users-table and domain checks, and startup is refused when
-    `NODE_ENV=production`.
-  - `EMAIL_MODE=log` writes outgoing mail to stdout and to a `dev_mail_log` table
-    instead of calling Gmail.
+## v1 history (1.0.0 and 1.1.0)
 
-### Small additions and interpretations
-
-| Area | Decision |
-|---|---|
-| Schema | Extra columns `notes.role_id` and `emails_sent.role_id` (1.1.0). Extra table `dev_mail_log`, only written when `EMAIL_MODE=log`. A SQLite trigger refuses any `UPDATE` on `application_events`, so the log is append-only at the database level. `DELETE` is still allowed for candidate deletion. |
-| Env vars | Added `DEV_LOGIN`, `EMAIL_MODE`, `TRUST_PROXY` (number of reverse proxies, used to read the client IP for the rate limit) and `QUIET` (silences logs, for tests). |
-| Voltax entry | Besides the fields on the Change stage form, an already-Onboarded candidate has a small **Record Voltax** form, for when the ID is only known later. Saving it adds a `voltax_recorded` event. The Voltax fields on the stage form are always visible without JS. With JS, they show only when Onboarded is picked. |
-| Pipeline quick move | Moving a candidate to Onboarded from the pipeline row works and calls `voltax.createUser`, then redirects to the candidate page's Voltax form (1.1.0). |
-| Event values | `role_change` stores `from_value` and `to_value` as `"Role title (#id)"`. `voltax_recorded` stores `"<voltax id> (onboarded YYYY-MM-DD)"`. |
-| Notifications | If a role has no assigned rep, or the rep is deactivated, the notification goes to the first active admin. A rep's revoked refresh token (`invalid_grant`) is cleared, so later notifications use the admin's token straight away. |
-| Sign-in | Google only returns a refresh token on first consent. If a rep signs in and the app has no usable token for them, the app sends them back to Google once with `prompt=consent`. If the rep unticks the Gmail permission, sign-in still works and they see a warning. |
-| Admin guards | As well as refusing to deactivate yourself or the last active admin, the app refuses to **demote** the last active admin. The deactivation warning lists every role still assigned to the user, open or closed. |
-| Bootstrap admins | `ADMIN_EMAILS` are upserted as active admins on every start. To deactivate one permanently, remove them from `ADMIN_EMAILS` first. |
-| Apply form | "How did you hear about us?" is optional. If given, it must be one of the six options. Each writing-sample line must be an http(s) URL; a bare `example.com/post` gets `https://` added. Whitespace and newlines in the name are collapsed. The rate limit counts stored applications and honeypot hits only (1.1.0). It is in memory and resets on restart. A questionnaire fingerprint guards against answers landing on changed questions (1.1.0). |
-| Closed or unknown role | Returns the "This role is no longer open" page with HTTP 404. |
-| Oversized upload | A body over `MAX_UPLOAD_MB` + 1 MB gets 413 and a plain "file too large" page. A file over the limit but under the body cap gets a field error on the re-shown form. |
-| Email composer | **Load** is a plain GET (`?template=ID`), so it works without JS. The rep can edit the subject and body before sending. |
-| CSV | No BOM, CRLF line endings. The formula-injection guard also prefixes cells that start with a tab or CR (OWASP guidance), on top of `= + - @`. The date filter is inclusive and uses `APP_TIMEZONE` days. |
-| Headers | Every response also sends `X-Frame-Options: DENY` and `Referrer-Policy: same-origin`. Internal pages are `Cache-Control: no-store`. |
-| Cookies | The session cookie is always `Secure`, even in dev. Browsers that treat `http://localhost` as a secure context (Chrome, Firefox, Edge) accept it. |
-| Layout | Spec's file list has `src/lib/voltax`; the spec itself says `src/voltax.js`, which is what is used. |
-
-### Acceptance checks: automated coverage
-
-`npm test` (equivalent to `node --test`) covers AC-01 to AC-35. Each check has its own
-named test, except AC-20/21 and AC-24/25, which are tested together. A few are covered
-with limits:
-
-- **AC-13, AC-14, AC-27 (Google).** These run the real OAuth and Gmail code against a
-  fake Google, not against Google itself.
-- **AC-17 (Secure flag).** The test checks the `Set-Cookie` attributes. It cannot test
-  how a real browser handles them.
-- **AC-32 ("opens correctly in Google Sheets").** The test checks RFC 4180 output,
-  including quoting, CRLF, UTF-8 and the formula guard. Importing into Sheets was not
-  tested.
-- **AC-35 (container restart).** The test closes the app and starts it again on the same
-  `DATA_DIR`. A real `docker restart` with a mounted volume was not tested, because the
-  build sandbox has no Docker daemon. The `Dockerfile` was written but not built here.
+v1 was a single-VM Docker app: Google sign-in, Gmail API sending, SQLite on a mounted disk, uploads, a systemd unit and GCS backups. The 1.1.0 QA fixes that still apply in v2 are the product behaviours: ids never reused, notes and emails keep their role snapshot, the apply form's questionnaire fingerprint (409), the rate limit counting only stored applications and honeypot hits, reassign-rep select, Users admin name editing, Voltax stub (`src/voltax.js`, always `not_configured`; reps enter the Voltax ID by hand), CSV formula guard, `role_change` and `voltax_recorded` event value formats. Everything about Google, uploads, Docker, backups and `dev_mail_log` was removed in 2.0.0. The v1 spec is at commit `8c1d77a`.

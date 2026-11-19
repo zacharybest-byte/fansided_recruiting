@@ -46,7 +46,7 @@ test('AC-01: openings list groups open roles by vertical, hides closed ones, no 
   const nflSection = res.text.split('<h2>NFL</h2>')[1].split('</section>')[0];
   assert.match(nflSection, /Bears Writer/);
   assert.match(nflSection, /Questionnaire Role/);
-  assert.equal(res.headers.get('content-security-policy'), "default-src 'self'");
+  assert.match(res.headers.get('content-security-policy'), /^default-src 'none'; script-src 'self'/);
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
 });
 

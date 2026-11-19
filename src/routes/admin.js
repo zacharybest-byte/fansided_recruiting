@@ -9,6 +9,7 @@ const { nowIso } = require('../lib/db');
 const { MERGE_FIELDS } = require('../lib/email');
 const { randomToken, sha256Hex } = require('../lib/crypto');
 const { idParam } = require('./dashboard');
+const { loadSample, removeSample, sampleCounts } = require('../lib/sample');
 
 const MAX_QUESTIONS = 5;
 
@@ -274,9 +275,45 @@ function insertToken(kind, token, actorId, where, whereArgs) {
   };
 }
 
+// ---------- Sample data ----------
+
+async function samplePage(ctx) {
+  const c = await sampleCounts(ctx.app.db);
+  page(ctx, {
+    title: 'Sample data',
+    body: html`<h1>Sample data</h1>
+      <p>For the team demo. Loads 3 sample roles and 8 clearly fake applicants (<code>Sample Applicant ... (demo)</code>, <code>@example.com</code>)
+        spread across all five stages. Real data is never touched.</p>
+      <p>${c.loaded ? html`Sample data is loaded: ${c.roles} roles, ${c.people} people, ${c.applications} applications.` : 'No sample data is loaded.'}</p>
+      <form method="post" action="/app/admin/sample/load" class="inline">${csrfField(ctx)}
+        <button type="submit" class="primary"${c.loaded ? raw(' disabled') : ''}>Load sample data</button></form>
+      <form method="post" action="/app/admin/sample/remove" class="inline">${csrfField(ctx)}
+        <button type="submit" class="danger" data-confirm="Remove all sample roles, people and applications?"${c.loaded ? '' : raw(' disabled')}>Remove sample data</button></form>
+      <p class="muted">Removing deletes the sample people and everything attached to them. A sample role that already has a real application is closed and kept.</p>`,
+  });
+}
+
 function register(router) {
   const A = [requireAdmin];
   const AP = [requireAdmin, internalForm];
+
+  // Sample data
+  router.get('/app/admin/sample', ...A, samplePage);
+  router.post('/app/admin/sample/load', ...AP, async (ctx) => {
+    const r = await loadSample(ctx.app.db, ctx.user.id);
+    if (!r.ok) setFlash(ctx, 'error', 'Sample data is already loaded. Remove it first.');
+    else {
+      ctx.app.log(`[admin] sample data loaded by=${ctx.user.id}`);
+      setFlash(ctx, 'ok', `Loaded ${r.roles} sample roles and ${r.people} sample people.`);
+    }
+    ctx.redirect('/app/admin/sample');
+  });
+  router.post('/app/admin/sample/remove', ...AP, async (ctx) => {
+    await removeSample(ctx.app.db);
+    ctx.app.log(`[admin] sample data removed by=${ctx.user.id}`);
+    setFlash(ctx, 'ok', 'Sample data removed.');
+    ctx.redirect('/app/admin/sample');
+  });
 
   // Templates
   router.get('/app/admin/templates', ...A, templatesPage);

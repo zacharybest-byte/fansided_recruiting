@@ -11,7 +11,7 @@ const BASELINE = [
     applied_at TEXT NOT NULL
   )`,
   `CREATE TABLE users (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT 'rep' CHECK (role IN ('admin','rep')),
@@ -42,7 +42,7 @@ const BASELINE = [
   )`,
   'CREATE INDEX auth_tokens_user ON auth_tokens(user_id)',
   `CREATE TABLE job_roles (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     vertical TEXT NOT NULL DEFAULT '',
     site_name TEXT NOT NULL DEFAULT '',

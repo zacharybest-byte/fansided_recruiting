@@ -33,6 +33,9 @@ const MAX_BODY_BYTES = 512 * 1024;
 // Reads the whole body into memory, refusing anything over `limit` bytes with a 413.
 // Oversized bodies are drained (up to a bound) so the client can read the 413 response.
 function readBody(req, limit) {
+  // Vercel's Node helpers can consume the stream and expose the parsed body as `req.body` instead.
+  // If the stream is already finished, nothing more will arrive on it, so use the helper's value.
+  if (req.readableEnded || req.destroyed) return Promise.resolve(bodyFromHelper(req, limit));
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length']);
     let size = 0;
@@ -50,6 +53,7 @@ function readBody(req, limit) {
     });
     req.on('end', () => {
       if (tooBig) reject(new HttpError(413, 'Request body too large'));
+      else if (size === 0 && declared > 0) resolve(bodyFromHelper(req, limit)); // stream already drained by a helper
       else resolve(Buffer.concat(chunks));
     });
     req.on('error', reject);
@@ -57,6 +61,30 @@ function readBody(req, limit) {
       if (tooBig) reject(new HttpError(413, 'Request body too large'));
     });
   });
+}
+
+// Rebuilds the raw urlencoded body from Vercel's `req.body` helper (Buffer, string or parsed object).
+// Returns an empty buffer when there is nothing usable. The size cap applies here too.
+function bodyFromHelper(req, limit) {
+  let value;
+  try {
+    value = req.body;
+  } catch {
+    return Buffer.alloc(0);
+  }
+  let buf;
+  if (Buffer.isBuffer(value)) buf = value;
+  else if (typeof value === 'string') buf = Buffer.from(value, 'utf8');
+  else if (value && typeof value === 'object') {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(value)) {
+      if (Array.isArray(v)) v.forEach((x) => params.append(k, String(x)));
+      else if (v !== undefined && v !== null) params.append(k, String(v));
+    }
+    buf = Buffer.from(params.toString(), 'utf8');
+  } else buf = Buffer.alloc(0);
+  if (buf.length > limit) throw new HttpError(413, 'Request body too large');
+  return buf;
 }
 
 // Only application/x-www-form-urlencoded is accepted (anything else is refused before the body is read).
@@ -72,12 +100,18 @@ async function readForm(req, limit = MAX_BODY_BYTES) {
   return new Form(fields);
 }
 
+// Sent on EVERY response (SPEC section 7). HSTS is added only in production.
 const SECURITY_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'",
-  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   'X-Frame-Options': 'DENY',
-  'Referrer-Policy': 'same-origin',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
 };
+const HSTS = 'max-age=63072000; includeSubDomains';
+
+function securityHeaders(production) {
+  return production ? { ...SECURITY_HEADERS, 'Strict-Transport-Security': HSTS } : { ...SECURITY_HEADERS };
+}
 
 function createContext(req, res, app) {
   const url = new URL(req.url, 'http://internal');
@@ -103,7 +137,7 @@ function createContext(req, res, app) {
       if (res.headersSent) return;
       const isBuffer = Buffer.isBuffer(body);
       const payload = isBuffer ? body : Buffer.from(body instanceof SafeHtml ? body.value : String(body ?? ''), 'utf8');
-      const h = { ...SECURITY_HEADERS, 'Cache-Control': 'no-store', ...headers };
+      const h = { ...securityHeaders(app.config.production), 'Cache-Control': 'no-store', ...headers };
       if (!h['Content-Type']) h['Content-Type'] = 'text/html; charset=utf-8';
       h['Content-Length'] = payload.length;
       if (ctx.outCookies.length) h['Set-Cookie'] = ctx.outCookies;
@@ -167,9 +201,11 @@ class Router {
   }
 }
 
-// Client address for rate limits. `trustedHeader` (for example "x-forwarded-for" on Vercel) is only read when
-// the app is told to trust it; the right-most entry is used, because a proxy appends the address it saw and
-// anything to the left of that is client-supplied. Otherwise the socket address is used.
+// Client address for rate limits. `trustedHeader` is only read when the app is told to trust it. On Vercel that is
+// `x-vercel-forwarded-for`: Vercel documents that it sets the client's public IP there (identical to
+// x-forwarded-for, but not overwritten by a proxy placed in front of Vercel) and does not forward external values.
+// If a list is ever present the right-most entry is used (the address the platform itself saw). Otherwise
+// (local runs, tests without the option) the socket address is used.
 function clientIp(req, trustedHeader) {
   if (trustedHeader) {
     const parts = String(req.headers[trustedHeader] || '')
@@ -181,4 +217,4 @@ function clientIp(req, trustedHeader) {
   return req.socket.remoteAddress || 'unknown';
 }
 
-module.exports = { HttpError, Form, MAX_BODY_BYTES, readBody, readForm, createContext, Router, clientIp, SECURITY_HEADERS };
+module.exports = { HttpError, Form, MAX_BODY_BYTES, readBody, readForm, createContext, Router, clientIp, SECURITY_HEADERS, securityHeaders };

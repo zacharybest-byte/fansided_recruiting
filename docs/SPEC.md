@@ -151,7 +151,7 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
 - **Rate limits (DB).** Rows in `rate_limits`, counted inside the window, old rows pruned opportunistically.
   Apply: 10 stored applications/honeypot hits per IP per hour. Login: 5 failures per email per 15 min and
   20 failures per IP per 15 min, checked before the password is verified. Setup and set-password POSTs:
-  10 per IP per 15 min. Client IP: Vercel's forwarded header in production, socket address locally.
+  10 per IP per 15 min. Client IP: `x-vercel-forwarded-for` on Vercel, socket address locally.
 - **Dashboard counts.** New per role from live data. "Since your last visit" = applications with
   `applied_at > users.dashboard_seen_at`; the dashboard then stamps `dashboard_seen_at = now`.
 - **Webhook.** If `NOTIFY_WEBHOOK_URL` (https only) is set, after an application is stored:
@@ -201,11 +201,15 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
 
 ## 9. Repo layout and deliverables
 
-`api/index.js` (exports the handler), `vercel.json` (routes every path to it), `public/` (CSS + JS only),
-`src/` (app), `test/` (incl. the fake `/v2/pipeline` server), `scripts/fake-turso.js` (runs the fake for
-local production-like testing), one-page `README.md`, `docs/`. Removed: `Dockerfile`, `.dockerignore`,
-`deploy/`, `scripts/backup.js`, `scripts/seed.js`, Google/Gmail/multipart/token-encryption code.
-`package.json`: version `2.0.0`, `"engines": { "node": "22.x" }`.
+`api/index.js` (exports the handler; the app is created once at module scope), `vercel.json` (rewrites `/(.*)` to
+`/api/index`, `functions["api/index.js"].includeFiles = "public/**"`, and a `headers` block for the CDN-servable
+`/style.css` and `/app.js`), `public/` (`style.css` and `app.js` only; assets are requested as `/public/...` and
+served by the function), `src/` (app: `app.js`, `server.js` for local runs, `lib/`, `routes/`, `voltax.js`), `test/`
+(incl. the fake `/v2/pipeline` server), `scripts/fake-turso.js` (runs the fake for local production-like testing),
+one-page `README.md`, `docs/`, `.env.example` (the seven settings). Removed: `Dockerfile`, `.dockerignore`, `deploy/`,
+`scripts/backup.js`, `scripts/seed.js`, Google/Gmail/multipart/token-encryption code.
+`package.json`: version `2.0.0`, `"engines": { "node": "22.x" }`, no dependencies, scripts `start`, `dev`, `test`.
+Client IP: `x-vercel-forwarded-for` on Vercel, the socket address locally.
 
 ## 10. Acceptance checks
 

@@ -33,7 +33,7 @@ function page(ctx, { title, body, status = 200 }) {
         <a href="/app">Dashboard</a>
         <a href="/app/export">Export</a>
         ${user.role === 'admin'
-          ? html`<a href="/app/admin/roles">Roles</a><a href="/app/admin/templates">Templates</a><a href="/app/admin/users">Users</a>`
+          ? html`<a href="/app/admin/roles">Roles</a><a href="/app/admin/templates">Templates</a><a href="/app/admin/users">Users</a><a href="/app/admin/sample">Sample data</a>`
           : ''}
         <span class="spacer"></span>
         <a href="/app/account">${user.name || user.email}${user.role === 'admin' ? ' (admin)' : ''}</a>

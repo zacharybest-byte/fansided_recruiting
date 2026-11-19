@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { loadConfig, ConfigError } = require('./lib/config');
 const { openDb, migrate } = require('./lib/db');
-const { createContext, Router, HttpError, clientIp, SECURITY_HEADERS } = require('./lib/http');
+const { createContext, Router, HttpError, clientIp, securityHeaders } = require('./lib/http');
 const { loadSession, requireAdmin } = require('./lib/auth');
 const { errorPage } = require('./lib/layout');
 const { dummyHash } = require('./lib/password');
@@ -30,11 +30,13 @@ const GENERIC_500 = '<!doctype html><html lang="en"><head><meta charset="utf-8">
 function brokenApp(err, options) {
   const log = options.log || ((msg) => console.log(`${new Date().toISOString()} ${msg}`));
   log(`[config] ${err.message}`);
+  const env = options.env || process.env;
+  const production = env.NODE_ENV === 'production' || Boolean(env.VERCEL);
   return {
     configError: err,
     handler(req, res) {
       const body = Buffer.from(GENERIC_500);
-      res.writeHead(500, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store' });
+      res.writeHead(500, { ...securityHeaders(production), 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store' });
       res.end(req.method === 'HEAD' ? undefined : body);
     },
     get ready() {
@@ -46,7 +48,7 @@ function brokenApp(err, options) {
 }
 
 // options: { env, log, db, dataDir, fetchImpl (outgoing webhook call), tursoFetchImpl (Turso driver),
-//            trustedIpHeader (request header carrying the client IP; default x-forwarded-for on Vercel, else none) }
+//            trustedIpHeader (request header carrying the client IP; default x-vercel-forwarded-for on Vercel, else none) }
 function createApp(options = {}) {
   let config;
   try {
@@ -58,7 +60,7 @@ function createApp(options = {}) {
   if (options.dataDir) config.dataDir = path.resolve(options.dataDir);
   const log = options.log || ((msg) => console.log(`${new Date().toISOString()} ${msg}`));
   for (const w of config.warnings) log(`[config] warning: ${w}`);
-  const trustedIpHeader = options.trustedIpHeader !== undefined ? options.trustedIpHeader : config.vercel ? 'x-forwarded-for' : null;
+  const trustedIpHeader = options.trustedIpHeader !== undefined ? options.trustedIpHeader : config.vercel ? 'x-vercel-forwarded-for' : null;
   const ownsDb = !options.db;
   const db = options.db || openDb(config, { fetchImpl: options.tursoFetchImpl });
   const app = { config, db, log, fetchImpl: options.fetchImpl };
@@ -121,8 +123,8 @@ function createApp(options = {}) {
         errorPage(ctx, status, message);
       } catch (renderErr) {
         log(`[error] rendering error page failed: ${renderErr}`);
-        res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end(message);
+        res.writeHead(status, { ...securityHeaders(config.production), 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(req.method === 'HEAD' ? undefined : message);
       }
     }
   }
@@ -130,7 +132,7 @@ function createApp(options = {}) {
   function handler(req, res) {
     return handle(req, res).catch((err) => {
       log(`[fatal] ${err.stack || err}`);
-      if (!res.headersSent) res.writeHead(500).end();
+      if (!res.headersSent) res.writeHead(500, { ...securityHeaders(config.production), 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }).end('Something went wrong');
     });
   }
 
