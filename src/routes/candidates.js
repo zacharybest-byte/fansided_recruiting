@@ -8,7 +8,7 @@ const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
 const { nowIso } = require('../lib/db');
 const { applyMergeFields, firstName, composeUrl, MERGE_FIELDS, VIA_LABELS } = require('../lib/email');
-const { todayIn, isValidYmd } = require('../lib/time');
+const { todayIn, isValidYmd, daysSince } = require('../lib/time');
 const { idParam } = require('./dashboard');
 const voltax = require('../voltax');
 
@@ -43,6 +43,101 @@ function describeEvent(e) {
   return e.type;
 }
 
+// Other applications by the same person, newest first, each with the notes written on it. Deleted candidates have no
+// history (their applications are deleted with them). Notes are visible to every signed-in user already.
+async function loadHistory(db, personId, applicationId) {
+  const rows = await db.all(
+    `SELECT a.id, a.stage, a.applied_at, a.stage_changed_at, r.title AS role_title, r.site_name,
+            s.name AS stage_name, s.kind AS stage_kind,
+            COALESCE(NULLIF(ru.name, ''), ru.email) AS rep_name,
+            (SELECT COALESCE(NULLIF(eu.name, ''), eu.email) FROM application_events e JOIN users eu ON eu.id = e.actor_user_id
+              WHERE e.application_id = a.id AND e.type = 'stage_change' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS last_actor
+       FROM applications a
+       JOIN job_roles r ON r.id = a.role_id
+       LEFT JOIN users ru ON ru.id = r.assigned_user_id
+       LEFT JOIN role_stages s ON s.id = a.stage_id
+      WHERE a.person_id = ? AND a.id != ? ORDER BY a.applied_at DESC, a.id DESC`,
+    [personId, applicationId]
+  );
+  const notesBy = new Map(rows.map((h) => [h.id, []]));
+  if (rows.length) {
+    const notes = await db.all(
+      `SELECT n.application_id, n.body, n.created_at, COALESCE(NULLIF(u.name, ''), u.email) AS author
+         FROM notes n LEFT JOIN users u ON u.id = n.author_user_id
+        WHERE n.person_id = ? AND n.application_id IN (${rows.map(() => '?').join(',')})
+        ORDER BY n.created_at DESC, n.id DESC`,
+      [personId, ...rows.map((h) => h.id)]
+    );
+    for (const n of notes) notesBy.get(n.application_id).push(n);
+  }
+  return rows.map((h) => ({
+    ...h,
+    kind: h.stage_kind || kindOfLegacy(h.stage),
+    stageName: h.stage_name || LEGACY_LABELS[h.stage] || h.stage,
+    notes: notesBy.get(h.id),
+  }));
+}
+
+// "Applied 3 times before: 1 onboarded, 2 passed."
+function historySummary(history) {
+  const n = history.length;
+  const of = (fn) => history.filter(fn).length;
+  const parts = [];
+  const onboarded = of((h) => h.kind === 'onboarded');
+  const passed = of((h) => h.kind === 'passed');
+  const open = n - onboarded - passed;
+  if (onboarded) parts.push(`${onboarded} onboarded`);
+  if (passed) parts.push(`${passed} passed`);
+  if (open) parts.push(`${open} still in progress`);
+  return `Applied ${n === 1 ? 'once' : `${n} times`} before: ${parts.join(', ')}.`;
+}
+
+function noteList(ctx, notes) {
+  return html`<ul class="notes history-note-list">${notes.map(
+    (n) => html`<li class="note"><div class="meta">${n.author || 'Unknown'}, ${fmtDateTime(ctx, n.created_at)}</div>${multiline(n.body)}</li>`
+  )}</ul>`;
+}
+
+function historyPanel(ctx, history) {
+  return html`<section class="card history-panel" id="history" aria-labelledby="history-h">
+    <h2 id="history-h">Application history</h2>
+    <p class="history-summary">${historySummary(history)}</p>
+    <ol class="history-list">
+      ${history.map((h) => {
+        const outcome = h.kind === 'onboarded' ? 'Onboarded on' : h.kind === 'passed' ? 'Passed on' : `Still in ${h.stageName} since`;
+        return html`<li class="history-item" data-application-id="${h.id}">
+          <div class="history-head">
+            <div class="history-title">
+              <h3>${h.role_title}${h.site_name ? html` <span class="history-site">${h.site_name}</span>` : ''}</h3>
+              <p class="history-outcome">${stageBadge({ kind: h.kind, name: h.stageName })} <span>${outcome} ${fmtDate(ctx, h.stage_changed_at)}</span></p>
+            </div>
+            <a class="btn btn-secondary" href="/app/applications/${h.id}">Open this application<span class="visually-hidden"> for ${h.role_title}</span></a>
+          </div>
+          <dl class="meta-list history-meta">
+            <div><dt>Applied</dt><dd>${fmtDate(ctx, h.applied_at)}</dd></div>
+            <div><dt>Assigned rep</dt><dd>${h.rep_name || 'Unassigned'}</dd></div>
+            ${h.last_actor ? html`<div><dt>Last moved by</dt><dd>${h.last_actor}</dd></div>` : ''}
+            <div><dt>Notes</dt><dd>${h.notes.length}</dd></div>
+          </dl>
+          ${h.notes.length
+            ? html`<details class="history-notes">
+                <summary>Show ${h.notes.length} ${h.notes.length === 1 ? 'note' : 'notes'} from this application</summary>
+                ${noteList(ctx, h.notes)}
+              </details>
+              <div class="history-notes-print" aria-hidden="true">${noteList(ctx, h.notes)}</div>`
+            : html`<p class="muted history-no-notes">No notes were written on this application.</p>`}
+        </li>`;
+      })}
+    </ol>
+  </section>`;
+}
+
+// Email with a break opportunity before the @, so a long address wraps there instead of in the middle of a word.
+function breakableEmail(email) {
+  const i = String(email).indexOf('@');
+  return i < 1 ? email : html`${email.slice(0, i)}<wbr>${email.slice(i)}`;
+}
+
 async function candidatePage(ctx) {
   const { db, config } = ctx.app;
   const id = idParam(ctx.params.id);
@@ -71,12 +166,7 @@ async function candidatePage(ctx) {
       WHERE m.person_id = ? ORDER BY m.sent_at DESC, m.id DESC`,
     [person.id]
   );
-  const history = await db.all(
-    `SELECT a.id, a.stage, a.applied_at, r.title AS role_title, s.name AS stage_name, s.kind AS stage_kind
-       FROM applications a JOIN job_roles r ON r.id = a.role_id LEFT JOIN role_stages s ON s.id = a.stage_id
-      WHERE a.person_id = ? AND a.id != ? ORDER BY a.applied_at DESC`,
-    [person.id, app.id]
-  );
+  const history = await loadHistory(db, person.id, app.id);
   const templates = await db.all('SELECT id, name, subject, body FROM email_templates ORDER BY name COLLATE NOCASE');
 
   // Email composer: "Load" is a plain GET (?template=ID) so it works without JS.
@@ -110,7 +200,7 @@ async function candidatePage(ctx) {
           <div>
             <h1>${person.name}</h1>
             <dl class="meta-list">
-              <div><dt>Email</dt><dd><a href="mailto:${encodeURIComponent(person.email)}">${person.email}</a></dd></div>
+              <div><dt>Email</dt><dd class="meta-email"><a href="mailto:${encodeURIComponent(person.email)}">${breakableEmail(person.email)}</a></dd></div>
               ${linkedin ? html`<div><dt>Profile</dt><dd>${link(linkedin, 'LinkedIn or portfolio')}</dd></div>` : ''}
               <div><dt>Role</dt><dd>${app.role_title}${app.role_status === 'closed' ? ' (closed)' : ''}</dd></div>
               <div><dt>Applied</dt><dd>${fmtDate(ctx, app.applied_at)}</dd></div>
@@ -124,6 +214,7 @@ async function candidatePage(ctx) {
           </ol>
         </div>
       </header>
+      ${history.length ? historyPanel(ctx, history) : ''}
 
       <div class="grid-2 wide-left">
       <div class="col">
@@ -145,15 +236,7 @@ async function candidatePage(ctx) {
           </dl>
         </section>
 
-        <section class="card" id="history">
-          <h2>Other applications</h2>
-          ${history.length === 0
-            ? html`<p class="muted">${person.name} has not applied for any other role.</p>`
-            : html`<div class="table-wrap"><table class="data"><thead><tr><th>Role</th><th>Applied</th><th>Stage</th></tr></thead><tbody>
-              ${history.map(
-                (h) => html`<tr><td><a href="/app/applications/${h.id}">${h.role_title}</a></td><td>${fmtDate(ctx, h.applied_at)}</td><td>${stageBadge({ kind: h.stage_kind || kindOfLegacy(h.stage), name: h.stage_name || LEGACY_LABELS[h.stage] || h.stage })}</td></tr>`
-              )}</tbody></table></div>`}
-        </section>
+        ${history.length ? '' : html`<p class="muted first-application" id="first-application">First application from this person.</p>`}
       </div>
 
       <div class="col">
@@ -567,60 +650,185 @@ function likePattern(q) {
   return `%${q.replace(/[\\%_]/g, '\\$&')}%`;
 }
 
+// Status filter values -> the stage kinds they show. "active" is what is still being worked: new + progress.
+const STATUS_KINDS = { active: ['new', 'progress'], new: ['new'], progress: ['progress'], onboarded: ['onboarded'], passed: ['passed'], all: ['new', 'progress', 'onboarded', 'passed'] };
+const STATUS_CHIPS = [['active', 'Active'], ['new', 'New'], ['progress', 'In progress'], ['onboarded', 'Onboarded'], ['passed', 'Passed'], ['all', 'All statuses']];
+const STATUS_WORDS = { active: 'active ', new: 'new ', progress: 'in progress ', onboarded: 'onboarded ', passed: 'passed ', all: '' };
+// Stage kind of an application; the legacy stage column covers rows that have no stage id.
+const KIND_SQL = "COALESCE(s.kind, CASE a.stage WHEN 'reviewing' THEN 'progress' WHEN 'trial' THEN 'progress' ELSE a.stage END)";
+
+// Whose candidates: me (default), all, none (roles without a rep, admin only) or a user id (admin only).
+// Anything else, including a rep asking for another user, falls back to the signed-in user's own list.
+async function resolveOwner(ctx) {
+  const { db } = ctx.app;
+  const value = ctx.query.get('owner') || 'me';
+  if (value === 'all') return { key: 'all' };
+  if (ctx.user.role === 'admin') {
+    if (value === 'none') return { key: 'none' };
+    if (/^[1-9]\d{0,14}$/.test(value) && Number(value) !== ctx.user.id) {
+      const user = await db.get('SELECT id, name, email FROM users WHERE id = ?', [Number(value)]);
+      if (user) return { key: String(user.id), user };
+    }
+  }
+  return { key: 'me' };
+}
+
 async function searchPage(ctx) {
   const { db } = ctx.app;
+  const isAdmin = ctx.user.role === 'admin';
   const q = (ctx.query.get('q') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const pageNo = /^[1-9]\d{0,3}$/.test(ctx.query.get('page') || '') ? Number(ctx.query.get('page')) : 1;
-  const from = 'FROM applications a JOIN people p ON p.id = a.person_id JOIN job_roles r ON r.id = a.role_id';
-  const where = q ? "WHERE p.name LIKE ? ESCAPE '\\' OR p.email LIKE ? ESCAPE '\\'" : '';
-  const filterArgs = q ? [likePattern(q), likePattern(q)] : [];
-  const total = (await db.get(`SELECT COUNT(*) AS n ${from} ${where}`, filterArgs)).n;
-  const href = (n) => `/app/candidates?${new URLSearchParams({ ...(q ? { q } : {}), ...(n > 1 ? { page: String(n) } : {}) }).toString()}`.replace(/\?$/, '');
+  const owner = await resolveOwner(ctx);
+  const status = Object.prototype.hasOwnProperty.call(STATUS_KINDS, ctx.query.get('status')) ? ctx.query.get('status') : 'active';
+  const sort = ctx.query.get('sort') === 'stage_age' ? 'stage_age' : 'recent';
+
+  // Everything is bookmarkable: defaults are left out of links so the plain page keeps a plain address.
+  const href = (over = {}) => {
+    const v = { q, owner: owner.key, status, sort, page: 1, ...over };
+    const params = new URLSearchParams();
+    if (v.q) params.set('q', v.q);
+    if (v.owner !== 'me') params.set('owner', v.owner);
+    if (v.status !== 'active') params.set('status', v.status);
+    if (v.sort !== 'recent') params.set('sort', v.sort);
+    if (v.page > 1) params.set('page', String(v.page));
+    const qs = params.toString();
+    return qs ? `/app/candidates?${qs}` : '/app/candidates';
+  };
+
+  // Scope = owner + search. The status chips count inside the scope, the list shows one status of it.
+  const from = 'FROM applications a JOIN people p ON p.id = a.person_id JOIN job_roles r ON r.id = a.role_id LEFT JOIN role_stages s ON s.id = a.stage_id';
+  const scope = [];
+  const scopeArgs = [];
+  if (owner.key === 'me') { scope.push('r.assigned_user_id = ?'); scopeArgs.push(ctx.user.id); }
+  else if (owner.key === 'none') scope.push('r.assigned_user_id IS NULL');
+  else if (owner.user) { scope.push('r.assigned_user_id = ?'); scopeArgs.push(owner.user.id); }
+  if (q) { scope.push("(p.name LIKE ? ESCAPE '\\' OR p.email LIKE ? ESCAPE '\\')"); scopeArgs.push(likePattern(q), likePattern(q)); }
+  const scopeSql = scope.length ? `WHERE ${scope.join(' AND ')}` : '';
+  const counts = { new: 0, progress: 0, onboarded: 0, passed: 0 };
+  for (const row of await db.all(`SELECT ${KIND_SQL} AS kind, COUNT(*) AS n ${from} ${scopeSql} GROUP BY ${KIND_SQL}`, scopeArgs)) {
+    if (row.kind in counts) counts[row.kind] += row.n;
+  }
+  const countFor = (key) => STATUS_KINDS[key].reduce((n, k) => n + counts[k], 0);
+  const total = countFor(status);
   const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // A page past the end (a stale link, or results that shrank) goes to the last real page.
-  if (pageNo > lastPage) return ctx.redirect(href(lastPage));
-  const shown = await db.all(
-    `SELECT a.id, a.stage, a.applied_at, p.name, p.email, r.title AS role_title, r.site_name, s.name AS stage_name, s.kind AS stage_kind
-       ${from} LEFT JOIN role_stages s ON s.id = a.stage_id ${where}
-      ORDER BY a.applied_at DESC, a.id DESC LIMIT ? OFFSET ?`,
-    [...filterArgs, PAGE_SIZE, (pageNo - 1) * PAGE_SIZE]
+  if (pageNo > lastPage) return ctx.redirect(href({ page: lastPage }));
+  const kinds = STATUS_KINDS[status];
+  const shown = total === 0 ? [] : await db.all(
+    `SELECT a.id, a.stage, a.applied_at, a.stage_changed_at, p.name, p.email, r.title AS role_title, r.site_name,
+            COALESCE(NULLIF(u.name, ''), u.email) AS rep_name, s.name AS stage_name, ${KIND_SQL} AS stage_kind
+       ${from} LEFT JOIN users u ON u.id = r.assigned_user_id
+      ${scopeSql}${scopeSql ? ' AND' : 'WHERE'} ${KIND_SQL} IN (${kinds.map(() => '?').join(',')})
+      ORDER BY ${sort === 'stage_age' ? 'a.stage_changed_at ASC, a.id ASC' : 'a.applied_at DESC, a.id DESC'} LIMIT ? OFFSET ?`,
+    [...scopeArgs, ...kinds, PAGE_SIZE, (pageNo - 1) * PAGE_SIZE]
   );
   const hasNext = pageNo < lastPage;
+
+  const ownerPhrase = owner.key === 'me' ? 'on your roles' : owner.key === 'all' ? 'on all roles' : owner.key === 'none' ? 'on roles without a rep' : `on ${owner.user.name || owner.user.email}'s roles`;
+  const matching = q ? html` matching "${q}"` : '';
+  const filtered = Boolean(q) || owner.key !== 'me' || status !== 'active' || sort !== 'recent';
+  const noun = (n) => (n === 1 ? 'candidate' : 'candidates');
+
+  let reps = [];
+  if (isAdmin) {
+    reps = await db.all('SELECT id, name, email FROM users WHERE active = 1 ORDER BY name COLLATE NOCASE, email');
+    if (owner.user && !reps.some((u) => u.id === owner.user.id)) reps.push(owner.user);
+  }
+  const chip = (label, url, current, count) =>
+    html`<li><a class="chip" href="${url}"${current ? html` aria-current="true"` : ''}>${label}${count === undefined ? '' : html` <span class="chip-count">${count}</span>`}</a></li>`;
+
+  let empty;
+  if (shown.length === 0) {
+    const anywhere = Boolean(await db.get('SELECT 1 AS x FROM applications LIMIT 1'));
+    const tips = [];
+    if (anywhere) {
+      if (status !== 'all' && countFor('all') > 0) tips.push(html`<a class="btn btn-secondary" href="${href({ status: 'all' })}">Show all statuses (${countFor('all')})</a>`);
+      if (owner.key !== 'all') tips.push(html`<a class="btn btn-secondary" href="${href({ owner: 'all' })}">Show all candidates</a>`);
+      if (q) tips.push(html`<a class="btn btn-secondary" href="${href({ q: '' })}">Clear the search</a>`);
+    }
+    empty = anywhere
+      ? html`<div class="empty" id="candidates-empty">
+          <h2>No ${STATUS_WORDS[status]}candidates ${ownerPhrase}${matching}</h2>
+          <p>${q ? 'Check the spelling, try part of the name or the email address, or widen the filters.' : status === 'active' && owner.key === 'me' ? 'Nobody on your roles is waiting for you. Show every status, or look at everyone, to see more.' : 'Change the filters above to see more candidates.'}</p>
+          ${tips.length ? html`<p class="empty-actions">${tips}</p>` : ''}
+        </div>`
+      : html`<div class="empty" id="candidates-empty">
+          <h2>No applications yet</h2>
+          <p>Applications appear here as soon as someone applies for an open role.</p>
+        </div>`;
+  }
+
   page(ctx, {
     title: 'Candidates',
     body: html`<div class="page-header"><div><h1>Candidates</h1>
-        <p class="lede">Find anyone who has applied, by name or email.</p></div></div>
+        <p class="lede">Your candidates by default. Search by name or email, and filter by rep and status.</p></div></div>
       <form method="get" action="/app/candidates" class="search-bar" role="search">
         <label class="visually-hidden" for="f-q">Search by name or email</label>
         <input type="search" id="f-q" name="q" value="${q}" maxlength="100" placeholder="Name or email" autocomplete="off">
+        ${owner.key !== 'me' ? html`<input type="hidden" name="owner" value="${owner.key}">` : ''}
+        ${status !== 'active' ? html`<input type="hidden" name="status" value="${status}">` : ''}
+        ${sort !== 'recent' ? html`<input type="hidden" name="sort" value="${sort}">` : ''}
         <button type="submit" class="btn btn-primary">Search</button>
-        ${q ? html`<a class="btn btn-secondary" href="/app/candidates">Clear</a>` : ''}
       </form>
+      <div class="filter-panel" id="candidate-filters">
+        <div class="filter-row">
+          <span class="filter-label" id="fl-owner">Whose</span>
+          <ul class="filter" aria-labelledby="fl-owner">
+            ${chip('My candidates', href({ owner: 'me' }), owner.key === 'me')}
+            ${chip('All candidates', href({ owner: 'all' }), owner.key === 'all')}
+          </ul>
+          ${isAdmin
+            ? html`<form method="get" action="/app/candidates" class="inline rep-picker" id="rep-picker">
+                ${q ? html`<input type="hidden" name="q" value="${q}">` : ''}
+                ${status !== 'active' ? html`<input type="hidden" name="status" value="${status}">` : ''}
+                ${sort !== 'recent' ? html`<input type="hidden" name="sort" value="${sort}">` : ''}
+                <label for="f-owner">Rep</label>
+                <select name="owner" id="f-owner">
+                  <option value="me"${owner.key === 'me' || owner.key === 'all' ? raw(' selected') : ''}>${owner.key === 'all' ? 'Choose a rep…' : 'Me'}</option>
+                  ${reps.filter((u) => u.id !== ctx.user.id).map((u) => html`<option value="${u.id}"${owner.user && owner.user.id === u.id ? raw(' selected') : ''}>${u.name || u.email}</option>`)}
+                  <option value="none"${owner.key === 'none' ? raw(' selected') : ''}>Unassigned roles</option>
+                </select>
+                <button type="submit" class="btn btn-secondary">Show</button>
+              </form>`
+            : ''}
+        </div>
+        <div class="filter-row">
+          <span class="filter-label" id="fl-status">Status</span>
+          <ul class="filter" aria-labelledby="fl-status">
+            ${STATUS_CHIPS.map(([key, label]) => chip(label, href({ status: key }), status === key, countFor(key)))}
+          </ul>
+        </div>
+        <div class="filter-row">
+          <span class="filter-label" id="fl-sort">Order</span>
+          <ul class="filter" aria-labelledby="fl-sort">
+            ${chip('Recently applied', href({ sort: 'recent' }), sort === 'recent')}
+            ${chip('Longest in stage', href({ sort: 'stage_age' }), sort === 'stage_age')}
+          </ul>
+        </div>
+      </div>
       ${shown.length === 0
-        ? html`<div class="empty">
-            <h2>${q ? html`No candidates match "${q}"` : 'No applications yet'}</h2>
-            <p>${q ? 'Check the spelling, or try part of the name or the email address.' : 'Applications appear here as soon as someone applies for an open role.'}</p>
-            ${q ? html`<p><a class="btn btn-secondary" href="/app/candidates">Show recent applications</a></p>` : ''}
-          </div>`
-        : html`<p class="result-count" id="result-count">${q ? `${total} ${total === 1 ? 'match' : 'matches'} for "${q}"` : `${total} ${total === 1 ? 'application' : 'applications'}, most recent first`}${lastPage > 1 ? `. Page ${pageNo} of ${lastPage}` : ''}</p>
-          <div class="table-wrap"><table class="data" id="candidates-table">
-            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Stage</th><th>Applied</th></tr></thead>
+        ? html`${filtered ? html`<p class="result-count"><a href="/app/candidates" id="clear-filters">Clear filters</a></p>` : ''}${empty}`
+        : html`<p class="result-count" id="result-count">${total} ${STATUS_WORDS[status]}${noun(total)} ${ownerPhrase}${matching}, ${sort === 'stage_age' ? 'longest in stage first' : 'most recently applied first'}${lastPage > 1 ? `. Page ${pageNo} of ${lastPage}` : ''}${filtered ? html`. <a href="/app/candidates" id="clear-filters">Clear filters</a>` : ''}</p>
+          <div class="table-wrap table-stack"><table class="data" id="candidates-table">
+            <thead><tr><th>Candidate</th><th>Role</th><th>Stage</th><th>Rep</th><th>Applied</th><th class="num">Days in stage</th></tr></thead>
             <tbody>
-              ${shown.map(
-                (a) => html`<tr>
-                  <td class="nowrap"><a href="/app/applications/${a.id}"><strong>${a.name}</strong></a></td>
-                  <td class="nowrap">${a.email}</td>
-                  <td>${a.role_title}${a.site_name ? html`<span class="cell-sub">${a.site_name}</span>` : ''}</td>
-                  <td>${stageBadge({ kind: a.stage_kind || kindOfLegacy(a.stage), name: a.stage_name || LEGACY_LABELS[a.stage] || a.stage })}</td>
-                  <td>${fmtDate(ctx, a.applied_at)}</td>
-                </tr>`
-              )}
+              ${shown.map((a) => {
+                const days = daysSince(a.stage_changed_at);
+                return html`<tr>
+                  <td data-label="Candidate" class="cell-candidate"><a href="/app/applications/${a.id}"><strong>${a.name}</strong></a><span class="cell-sub">${a.email}</span></td>
+                  <td data-label="Role"><span>${a.role_title}${a.site_name ? html`<span class="cell-sub">${a.site_name}</span>` : ''}</span></td>
+                  <td data-label="Stage">${stageBadge({ kind: a.stage_kind, name: a.stage_name || LEGACY_LABELS[a.stage] || a.stage })}</td>
+                  <td data-label="Rep">${a.rep_name || html`<span class="muted">Unassigned</span>`}</td>
+                  <td data-label="Applied">${fmtDate(ctx, a.applied_at)}</td>
+                  <td data-label="Days in stage" class="num">${days}</td>
+                </tr>`;
+              })}
             </tbody>
           </table></div>
           ${pageNo > 1 || hasNext
             ? html`<nav class="pager" aria-label="Pages">
-                ${pageNo > 1 ? html`<a class="btn btn-secondary pager-prev" rel="prev" href="${href(pageNo - 1)}">Previous 50</a>` : ''}
-                ${hasNext ? html`<a class="btn btn-secondary pager-next" rel="next" href="${href(pageNo + 1)}">Next 50</a>` : ''}
+                ${pageNo > 1 ? html`<a class="btn btn-secondary pager-prev" rel="prev" href="${href({ page: pageNo - 1 })}">Previous 50</a>` : ''}
+                ${hasNext ? html`<a class="btn btn-secondary pager-next" rel="next" href="${href({ page: pageNo + 1 })}">Next 50</a>` : ''}
               </nav>`
             : ''}`}`,
   });

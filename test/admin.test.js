@@ -173,7 +173,7 @@ test('AC-30: the users page shows Active / Invite pending / Deactivated', async 
   await makeUser(t.db, { email: 'st-pending@fansided.com', password: null });
   await makeUser(t.db, { email: 'st-off@fansided.com', active: 0 });
   const text = (await admin.get('/app/admin/users')).text;
-  const cell = (email) => new RegExp(`${email}</td>[\\s\\S]*?<td class="status-cell">([^<]*)</td>`).exec(text)[1];
+  const cell = (email) => new RegExp(`${email}</td>[\\s\\S]*?<td class="status-cell" data-label="Status">([^<]*)</td>`).exec(text)[1];
   assert.equal(cell('st-active@fansided.com'), 'Active');
   assert.equal(cell('st-pending@fansided.com'), 'Invite pending');
   assert.equal(cell('st-off@fansided.com'), 'Deactivated');

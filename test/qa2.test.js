@@ -196,7 +196,7 @@ for (const driver of DRIVERS) {
         assert.deepEqual(results.map((r) => r.status), Array(6).fill(303));
         assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
         assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 6);
-        assert.equal(await count(t.db, 'applications'), 18);
+        assert.equal(await count(t.db, 'applications'), 20);
         const flashes = results.map((r) => r.headers.getSetCookie().find((c) => c.startsWith('flash=')));
         assert.ok(flashes.every(Boolean));
         // applying with a sample address is a normal field error
@@ -325,7 +325,7 @@ for (const driver of DRIVERS) {
           '/app', '/app?view=all', '/app/account', '/app/export', `/app/roles/${role}`, `/app/applications/${mine.id}`, `/app/applications/${mine.id}?template=1`, `/app/applications/${a.lastInsertRowid}`,
           `/app/people/${mine.person_id}/delete`, '/app/admin/roles', `/app/admin/roles/${role}`, '/app/admin/templates', '/app/admin/users', '/app/admin/sample',
         ];
-        const SAFE_TAGS = new Set(['html', 'head', 'meta', 'title', 'link', 'script', 'body', 'nav', 'a', 'span', 'form', 'input', 'button', 'main', 'p', 'h1', 'h2', 'h3', 'ul', 'ol', 'li', 'div', 'section', 'article', 'header', 'footer', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col', 'label', 'select', 'option', 'textarea', 'details', 'summary', 'dl', 'dt', 'dd', 'code', 'strong', 'em', 'small', 'pre', 'br', 'time', 'fieldset', 'legend', 'datalist', 'img']);
+        const SAFE_TAGS = new Set(['html', 'head', 'meta', 'title', 'link', 'script', 'body', 'nav', 'a', 'span', 'form', 'input', 'button', 'main', 'p', 'h1', 'h2', 'h3', 'ul', 'ol', 'li', 'div', 'section', 'article', 'header', 'footer', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col', 'label', 'select', 'option', 'textarea', 'details', 'summary', 'dl', 'dt', 'dd', 'code', 'strong', 'em', 'small', 'pre', 'br', 'time', 'fieldset', 'legend', 'datalist', 'img', 'wbr']);
         const clients = [t.client(), admin];
         for (const url of urls) {
           const res = await (url.startsWith('/app') ? admin : clients[0]).get(url);

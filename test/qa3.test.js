@@ -168,16 +168,16 @@ for (const driver of DRIVERS) {
         const p = await t.db.run('INSERT INTO people (email, name, created_at, updated_at) VALUES (?, ?, ?, ?)', [`zq${i}@example.com`, `Zqperson ${i}`, now, now]);
         await t.db.run('INSERT INTO applications (person_id, role_id, stage, applied_at, stage_changed_at) VALUES (?, ?, ?, ?, ?)', [p.lastInsertRowid, r2, 'new', now, now]);
       }
-      const res = await admin.get('/app/candidates?q=zqperson');
-      assert.match(res.text, /id="result-count">53 matches for &quot;zqperson&quot;\. Page 1 of 2</);
-      assert.match((await admin.get('/app/candidates?q=zqperson+1')).text, /id="result-count">\d+ matches? for/);
-      const past = await admin.get('/app/candidates?q=zqperson&page=9');
+      const res = await admin.get('/app/candidates?owner=all&q=zqperson');
+      assert.match(res.text, /id="result-count">53 active candidates on all roles matching "zqperson", most recently applied first\. Page 1 of 2\. <a href="\/app\/candidates" id="clear-filters">Clear filters<\/a>/);
+      assert.match((await admin.get('/app/candidates?owner=all&q=zqperson+1')).text, /id="result-count">\d+ active candidates? on all roles matching/);
+      const past = await admin.get('/app/candidates?owner=all&q=zqperson&page=9');
       assert.equal(past.status, 303);
-      assert.equal(past.headers.get('location'), '/app/candidates?q=zqperson&page=2');
-      const none = await admin.get('/app/candidates?q=nomatchatall&page=3');
-      assert.equal(none.headers.get('location'), '/app/candidates?q=nomatchatall');
-      assert.match((await admin.get('/app/candidates?q=zqperson&page=2')).text, /3 matches|53 matches/);
-      assert.match((await admin.get('/app/candidates?q=zqperson1')).text, /No candidates match/);
+      assert.equal(past.headers.get('location'), '/app/candidates?q=zqperson&owner=all&page=2');
+      const none = await admin.get('/app/candidates?owner=all&q=nomatchatall&page=3');
+      assert.equal(none.headers.get('location'), '/app/candidates?q=nomatchatall&owner=all');
+      assert.match((await admin.get('/app/candidates?owner=all&q=zqperson&page=2')).text, /3 active candidates on all roles matching/);
+      assert.match((await admin.get('/app/candidates?owner=all&q=zqperson1')).text, /No active candidates on all roles matching/);
     });
   });
 

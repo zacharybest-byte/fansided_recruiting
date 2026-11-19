@@ -339,9 +339,9 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       assert.ok(flows.includes('New > Reviewing > Edit test > Trial > Onboarded > Passed'));
       assert.ok(flows.includes('New > Phone screen > Trial > Onboarded > Passed'));
       assert.equal(await count(t.db, 'job_roles', 'is_sample = 1 AND assigned_user_id = (SELECT id FROM users WHERE email = ?)', 'admin@fansided.com'), 6);
-      assert.equal(await count(t.db, 'notes', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 4);
+      assert.equal(await count(t.db, 'notes', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 8);
       assert.ok((await count(t.db, 'application_events', "type = 'stage_change'")) >= 18 + 12);
-      assert.equal(await count(t.db, 'applications', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 18);
+      assert.equal(await count(t.db, 'applications', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 20);
       // the pipeline pages render
       const roleRow = await t.db.get('SELECT id FROM job_roles WHERE is_sample = 1 ORDER BY id LIMIT 1');
       assert.equal((await admin.get(`/app/roles/${roleRow.id}`)).status, 200);

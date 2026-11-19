@@ -103,6 +103,19 @@ const PEOPLE = [
   ['Chloe Pierce', 5, 'Passed', 'Other', 'other', 29, 20],
 ];
 
+// Earlier applications by people who are in PEOPLE above (so the candidate page shows an application history):
+// [person index in PEOPLE, role index, stage NAME in that role, days since applied, days since the outcome, notes]
+const PRIOR = [
+  [4, 4, 'Passed', 140, 118, [
+    ['Pitches read as recaps rather than analysis. Worth another look once there is a stronger tactical sample.', 118],
+    ['Fast to reply and easy to work with. No concerns about reliability.', 119],
+  ]],
+  [2, 1, 'Onboarded', 210, 196, [
+    ['Onboarded for the season. Reliable on deadlines, strong on lineup analysis.', 196],
+    ['Stepped back in June after moving cities. Happy to hear from him again.', 90],
+  ]],
+];
+
 const ANSWERS = [
   [
     'The way the offence has changed around the tight end spot. I think it explains most of the early-season swings.',
@@ -201,6 +214,34 @@ async function loadSample(db, actorId, nowMs = Date.now()) {
             SELECT pe.id, a.id, a.role_id, ?, ?, ? FROM applications a JOIN people pe ON pe.id = a.person_id WHERE pe.email = ? AND pe.is_sample = 1`,
       args: [actorId, body, nowIso, p.email],
     });
+  }
+  // Earlier applications (with their own events and notes), so the demo shows the application history panel.
+  for (const [pi, ri, stage, applied, outcome, priorNotes] of PRIOR) {
+    const p = people[pi];
+    const role = ROLES[ri];
+    const kind = stageRows(role.progress || DEFAULT_PROGRESS).find(([, n]) => n === stage)[2];
+    const appliedAt = new Date(nowMs - applied * DAY).toISOString();
+    const changedAt = new Date(nowMs - outcome * DAY).toISOString();
+    const where = 'pe.email = ? AND pe.is_sample = 1 AND r.title = ? AND r.is_sample = 1';
+    stmts.push({
+      sql: `INSERT INTO applications (person_id, role_id, stage, stage_id, sample_links, resume_url, answers_json, heard_from, source_tag, applied_at, stage_changed_at, onboarded_at)
+            SELECT pe.id, r.id, ?, (SELECT s.id FROM role_stages s WHERE s.role_id = r.id AND s.name = ?), ?, '', ?, ?, ?, ?, ?, ? FROM people pe, job_roles r WHERE ${where}`,
+      args: [legacyCategory(kind), stage, p.links, JSON.stringify(role.questions.map((q) => ({ question: q.text, answer: 'Happy to talk this through on a call.' }))), p.heard, p.tag, appliedAt, changedAt, kind === 'onboarded' ? changedAt : null, p.email, role.title],
+    });
+    for (const [from, to, actor, at] of [[null, 'New', null, appliedAt], ['New', stage, actorId, changedAt]]) {
+      stmts.push({
+        sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+              SELECT a.id, 'stage_change', ?, ?, ?, ? FROM applications a JOIN people pe ON pe.id = a.person_id JOIN job_roles r ON r.id = a.role_id WHERE ${where}`,
+        args: [from, to, actor, at, p.email, role.title],
+      });
+    }
+    for (const [body, daysAgo] of priorNotes) {
+      stmts.push({
+        sql: `INSERT INTO notes (person_id, application_id, role_id, author_user_id, body, created_at)
+              SELECT pe.id, a.id, a.role_id, ?, ?, ? FROM applications a JOIN people pe ON pe.id = a.person_id JOIN job_roles r ON r.id = a.role_id WHERE ${where}`,
+        args: [actorId, body, new Date(nowMs - daysAgo * DAY).toISOString(), p.email, role.title],
+      });
+    }
   }
   try {
     await db.batch(stmts);

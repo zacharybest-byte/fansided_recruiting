@@ -631,6 +631,83 @@ td form.inline.nowrap select { min-width: 5.5rem; }
 .public-intro { margin: 0; }
 .candidate-header .page-header > div:first-child { flex: 1 1 28rem; }
 
+/* ---------- Candidates filters, stacked tables, application history (v2.2 stage B) ---------- */
+.filter-panel { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); margin: 0 0 var(--sp-4); display: grid; gap: var(--sp-3); }
+.filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); }
+.filter-label { flex: 0 0 4.5rem; font-size: var(--fs-sm); font-weight: 700; color: var(--mute); }
+.filter-row .filter { margin: 0; gap: var(--sp-2); }
+.chip-count { margin-left: var(--sp-2); font-variant-numeric: tabular-nums; font-weight: 400; }
+.rep-picker { margin-left: auto; gap: var(--sp-2); }
+.rep-picker label { font-weight: 700; font-size: var(--fs-sm); }
+.rep-picker select { min-width: 10rem; max-width: 100%; }
+.result-count a { font-weight: 600; }
+.empty-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.cell-candidate { overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .filter-label { flex: 1 1 100%; }
+  .rep-picker { margin-left: 0; width: 100%; }
+  .rep-picker select { flex: 1 1 10rem; }
+  .filter-panel { padding: var(--sp-3); }
+}
+/* A table that becomes a stack of cards on phones: every cell carries data-label with its column heading. */
+@media (max-width: 700px) {
+  .table-wrap.table-stack { overflow: visible; background: none; border: 0; }
+  .table-stack > table.data, .table-stack table.data { min-width: 0; display: block; background: none; }
+  .table-stack table.data thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .table-stack table.data tbody { display: grid; gap: var(--sp-3); }
+  .table-stack table.data tr { display: block; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--sp-2) var(--sp-4); }
+  .table-stack table.data tr:hover { background: var(--paper); }
+  .table-stack table.data td { display: grid; grid-template-columns: minmax(6.5rem, 38%) minmax(0, 1fr); gap: var(--sp-3); padding: var(--sp-2) 0; border: 0; border-top: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; align-items: baseline; }
+  .table-stack table.data td:first-child { border-top: 0; }
+  .table-stack table.data td::before { content: attr(data-label); font-size: var(--fs-xs); font-weight: 700; color: var(--mute); }
+  .table-stack table.data td.num { text-align: left; }
+  .table-stack table.data td form.inline.nowrap { flex-wrap: wrap; white-space: normal; }
+  .table-stack table.data td form.inline.nowrap input[type=text] { min-width: 0; flex: 1 1 10rem; }
+  .table-stack table.data td .cell-sub { grid-column: auto; }
+  .table-stack table.data td.cell-candidate { display: block; }
+  .table-stack table.data td.cell-candidate::before { content: none; }
+  .table-stack table.data td.cell-candidate strong { font-size: var(--fs-lg); }
+  .table-stack table.data td[data-label="Name"], .table-stack table.data td[data-label="Actions"] { grid-template-columns: 1fr; }
+  .table-stack table.data td[data-label="Name"]::before, .table-stack table.data td[data-label="Actions"]::before { content: none; }
+  .table-stack table.data td[data-label="Name"] input { flex: 1 1 10rem; }
+  .table-stack table.data tr.inactive { background: var(--field); }
+}
+
+/* candidate header: a long email wraps at the @ (or the column grows) instead of in the middle of a word */
+.candidate-header .meta-list dd.meta-email { overflow-wrap: break-word; word-break: normal; }
+.candidate-header .meta-list > div:has(.meta-email) { grid-column: span 2; }
+@media (max-width: 700px) { .candidate-header .meta-list > div:has(.meta-email) { grid-column: auto; } }
+
+/* application history panel: full width under the stepper */
+.history-panel { border-left: 4px solid var(--brand-2); }
+.history-summary { font-size: var(--fs-base); font-weight: 600; margin: 0 0 var(--sp-4); }
+.history-list { list-style: none; margin: 0; padding: 0; }
+.history-item { border-top: 1px solid var(--line); padding: var(--sp-4) 0; }
+.history-item:first-child { border-top: 0; padding-top: 0; }
+.history-item:last-child { padding-bottom: 0; }
+.history-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--sp-3) var(--sp-5); }
+.history-title { min-width: 0; flex: 1 1 18rem; }
+.history-title h3 { font-size: var(--fs-lg); margin: 0 0 var(--sp-1); overflow-wrap: anywhere; }
+.history-site { font-family: var(--font-body); font-size: var(--fs-sm); font-weight: 600; color: var(--mute); margin-left: var(--sp-2); }
+.history-outcome { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); margin: 0; }
+.history-meta { margin-top: var(--sp-3); }
+.history-notes { margin-top: var(--sp-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--field); }
+.history-notes > summary { cursor: pointer; padding: var(--sp-2) var(--sp-4); font-weight: 700; color: var(--brand); min-height: 2.5rem; display: flex; align-items: center; }
+.history-notes[open] > summary { border-bottom: 1px solid var(--line); }
+.history-note-list { padding: 0 var(--sp-4); }
+.history-note-list .note { overflow-wrap: anywhere; }
+.history-no-notes { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
+.history-notes-print { display: none; }
+.first-application { font-size: var(--fs-sm); margin: 0 0 var(--sp-5); }
+@media (max-width: 600px) { .history-head .btn { width: 100%; } .history-site { display: block; margin-left: 0; } }
+@media print {
+  .history-panel { break-inside: auto; border-left: 0; }
+  .history-notes { display: none; }
+  .history-notes-print { display: block; margin-top: var(--sp-2); }
+  .history-head .btn { display: none !important; }
+  .filter-panel { display: none; }
+}
+
 /* ---------- QA fixes ---------- */
 /* dashboard role card title is an h2 (outline) that looks like the old link */
 .role-heading { font-size: var(--fs-lg); line-height: 1.15; margin: 0; letter-spacing: -0.01em; }

@@ -183,7 +183,7 @@ for (const driver of DRIVERS) describe(`[${driver}] workflows`, () => {
     everywhere.push((await c.follow(move)).text); // the flash "Moved ... to <script>"
     everywhere.push((await c.get(`/app/applications/${appId}`)).text); // stepper, badge, move select, event log
     everywhere.push((await c.get('/app?view=all')).text);
-    everywhere.push((await c.get('/app/candidates?q=xss')).text);
+    everywhere.push((await c.get('/app/candidates?owner=all&status=all&q=xss')).text);
     everywhere.push((await c.get(`/app/admin/roles/${id}`)).text);
     for (const text of everywhere) {
       assert.doesNotMatch(text, /<script>alert\(1\)/);
@@ -541,7 +541,7 @@ for (const driver of DRIVERS) describe(`[${driver}] workflows`, () => {
     const id = await createRole('Search flow', ['Reviewing', 'Edit test']);
     const appId = await applyTo(id, 'Searchable Sam');
     await moveStage(admin, t.db, appId, 'Edit test', 'New');
-    const res = await admin.get('/app/candidates?q=searchable');
+    const res = await admin.get('/app/candidates?owner=all&q=searchable');
     assert.match(res.text, /<span class="stage-badge stage-progress">Edit test<\/span>/);
     const csv = (await admin.get('/app/export.csv')).text;
     assert.match(csv, new RegExp(`^${appId},.*,Edit test,progress,`, 'm'));

@@ -1,5 +1,5 @@
 'use strict';
-// Candidates search: GET /app/candidates?q=&page=
+// Candidates search: GET /app/candidates?owner=all&q=&page=
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const { DRIVERS, startApp, makeUser, makeRole } = require('./helpers');
@@ -33,7 +33,7 @@ for (const driver of DRIVERS) describe(`[${driver}] candidates search`, () => {
   after(() => t.close());
 
   test('finds by partial name, case-insensitively, with role, stage and a link to the application', async () => {
-    const res = await admin.get('/app/candidates?q=ARI');
+    const res = await admin.get('/app/candidates?owner=all&q=ARI');
     assert.equal(res.status, 200);
     assert.deepEqual(rowsOf(res.text).map((r) => r.name), ['Maria Gonzalez']);
     assert.match(res.text, /Search Role/);
@@ -42,21 +42,21 @@ for (const driver of DRIVERS) describe(`[${driver}] candidates search`, () => {
   });
 
   test('finds by email', async () => {
-    const res = await admin.get('/app/candidates?q=example.org');
+    const res = await admin.get('/app/candidates?owner=all&q=example.org');
     assert.deepEqual(rowsOf(res.text).map((r) => r.name), ['Marcus Bennett']);
   });
 
   test('% and _ are literal characters, not wildcards', async () => {
-    assert.deepEqual(rowsOf((await admin.get('/app/candidates?q=%25')).text).map((r) => r.name), ['100% Real']);
-    assert.deepEqual(rowsOf((await admin.get('/app/candidates?q=r_s')).text).map((r) => r.name), ['Under_score Person']);
-    const wild = await admin.get('/app/candidates?q=' + encodeURIComponent('M%s'));
+    assert.deepEqual(rowsOf((await admin.get('/app/candidates?owner=all&q=%25')).text).map((r) => r.name), ['100% Real']);
+    assert.deepEqual(rowsOf((await admin.get('/app/candidates?owner=all&q=r_s')).text).map((r) => r.name), ['Under_score Person']);
+    const wild = await admin.get('/app/candidates?owner=all&q=' + encodeURIComponent('M%s'));
     assert.deepEqual(rowsOf(wild.text), []);
-    assert.match(wild.text, /No candidates match/);
+    assert.match(wild.text, /No active candidates on all roles matching/);
   });
 
   test('SQL-looking input is data', async () => {
     for (const q of ["' OR 1=1 --", "'; DROP TABLE people; --", '\\', "x' UNION SELECT 1 --"]) {
-      const res = await admin.get('/app/candidates?q=' + encodeURIComponent(q));
+      const res = await admin.get('/app/candidates?owner=all&q=' + encodeURIComponent(q));
       assert.equal(res.status, 200, q);
       assert.deepEqual(rowsOf(res.text), [], q);
     }
@@ -65,20 +65,23 @@ for (const driver of DRIVERS) describe(`[${driver}] candidates search`, () => {
 
   test('an XSS payload in q is escaped everywhere it is echoed', async () => {
     const payload = '"><script>alert(1)</script><img src=x onerror=alert(2)>';
-    const res = await admin.get('/app/candidates?q=' + encodeURIComponent(payload));
+    const res = await admin.get('/app/candidates?owner=all&q=' + encodeURIComponent(payload));
     assert.equal(res.status, 200);
     assert.doesNotMatch(res.text, /<script>alert/);
     assert.doesNotMatch(res.text, /<img src=x/);
     assert.match(res.text, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   });
 
-  test('an empty q lists the most recent applications first; a rep may use it', async () => {
+  test('an empty q lists the most recent applications first; a rep may use it (their own roles by default, here none)', async () => {
     const rep = t.client();
     await rep.login('rep@fansided.com');
-    const res = await rep.get('/app/candidates');
-    assert.equal(res.status, 200);
+    const mine = await rep.get('/app/candidates');
+    assert.equal(mine.status, 200);
+    assert.deepEqual(rowsOf(mine.text), []);
+    assert.match(mine.text, /No active candidates on your roles/);
+    const res = await rep.get('/app/candidates?owner=all');
     assert.deepEqual(rowsOf(res.text).map((r) => r.name), ['Underscore Neighbour', 'Under_score Person', '100% Real', 'Marcus Bennett', 'Maria Gonzalez']);
-    assert.match(res.text, /5 applications, most recent first/);
+    assert.match(res.text, /5 active candidates on all roles, most recently applied first/);
   });
 
   test('signed-out visitors are redirected to sign in', async () => {
@@ -97,20 +100,20 @@ for (const driver of DRIVERS) describe(`[${driver}] candidates search`, () => {
       }
       const c = t2.client();
       await c.login('admin@fansided.com');
-      const p1 = await c.get('/app/candidates?q=bulk');
+      const p1 = await c.get('/app/candidates?owner=all&q=bulk');
       assert.equal(rowsOf(p1.text).length, 50);
       assert.equal(rowsOf(p1.text)[0].name, 'Bulk Person 119');
-      assert.match(p1.text, /href="\/app\/candidates\?q=bulk&amp;page=2"/);
+      assert.match(p1.text, /href="\/app\/candidates\?q=bulk&amp;owner=all&amp;page=2"/);
       assert.doesNotMatch(p1.text, /pager-prev/);
-      const p2 = await c.get('/app/candidates?q=bulk&page=2');
+      const p2 = await c.get('/app/candidates?owner=all&q=bulk&page=2');
       assert.equal(rowsOf(p2.text).length, 50);
       assert.equal(rowsOf(p2.text)[0].name, 'Bulk Person 069');
-      assert.match(p2.text, /pager-prev[^>]*href="\/app\/candidates\?q=bulk"/);
+      assert.match(p2.text, /pager-prev[^>]*href="\/app\/candidates\?q=bulk&amp;owner=all"/);
       assert.match(p2.text, /pager-next/);
-      const p3 = await c.get('/app/candidates?q=bulk&page=3');
+      const p3 = await c.get('/app/candidates?owner=all&q=bulk&page=3');
       assert.equal(rowsOf(p3.text).length, 20);
       assert.doesNotMatch(p3.text, /pager-next/);
-      assert.equal(rowsOf((await c.get('/app/candidates?q=bulk&page=abc')).text).length, 50); // junk page falls back to 1
+      assert.equal(rowsOf((await c.get('/app/candidates?owner=all&q=bulk&page=abc')).text).length, 50); // junk page falls back to 1
     } finally {
       await t2.close();
     }

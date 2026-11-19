@@ -413,21 +413,21 @@ async function usersPage(ctx, { errors = {}, values = {}, status = 200, link = n
             <div class="field"><label for="link-url">Link</label><input type="text" readonly id="link-url" class="wide" value="${link.url}" size="80"></div>
           </section>`
         : ''}
-      <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap table-stack"><table class="data" id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th>Actions</th></tr></thead><tbody>
         ${users.map(
           (u) => html`<tr class="${u.active ? '' : 'inactive'}" data-user-id="${u.id}">
-            <td><form method="post" action="/app/admin/users/${u.id}/name" class="inline nowrap">${csrfField(ctx)}
+            <td data-label="Name"><form method="post" action="/app/admin/users/${u.id}/name" class="inline nowrap">${csrfField(ctx)}
               <input type="text" name="name" value="${u.name}" maxlength="200" required aria-label="Display name for ${u.email}" placeholder="Display name">
               <button type="submit" class="btn btn-sm btn-secondary">Save name</button></form></td>
-            <td class="wrap">${u.email}</td>
-            <td><form method="post" action="/app/admin/users/${u.id}/role" class="inline nowrap">${csrfField(ctx)}
+            <td class="wrap" data-label="Email">${u.email}</td>
+            <td data-label="Role"><form method="post" action="/app/admin/users/${u.id}/role" class="inline nowrap">${csrfField(ctx)}
               <select name="role" aria-label="Role for ${u.email}">
                 <option value="rep"${u.role === 'rep' ? raw(' selected') : ''}>Rep</option>
                 <option value="admin"${u.role === 'admin' ? raw(' selected') : ''}>Admin</option>
               </select> <button type="submit" class="btn btn-sm btn-secondary">Change role</button></form></td>
-            <td class="status-cell">${statusOf(u)}</td>
-            <td class="num">${u.role_count}</td>
-            <td><div class="row-actions">${u.active
+            <td class="status-cell" data-label="Status">${statusOf(u)}</td>
+            <td class="num" data-label="Roles assigned">${u.role_count}</td>
+            <td data-label="Actions"><div class="row-actions">${u.active
               ? html`<form method="post" action="/app/admin/users/${u.id}/reset-link" class="inline">${csrfField(ctx)}<button type="submit" class="link">${u.has_password ? 'Create reset link' : 'Create invite link'}</button></form>
                  <a class="danger-link" href="/app/admin/users/${u.id}/deactivate">Deactivate<span class="visually-hidden"> ${u.name || u.email}</span></a>`
               : html`<form method="post" action="/app/admin/users/${u.id}/reactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link">Reactivate</button></form>`}</div></td>

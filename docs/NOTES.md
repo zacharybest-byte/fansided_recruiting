@@ -20,6 +20,16 @@ Additive only, one atomic batch with its tracking row: create `role_stages` + in
 - No unique index on stage names or positions: renames and reorders pass through states a per-statement index would refuse; uniqueness is validated in the app and the stage set is guarded in the batch.
 - Known quirk: events from before 2.2.0 hold lower-case words (`reviewing`). They display as "Reviewing". A custom stage named exactly in lower case like a legacy word ("trial") shows capitalised in the event log.
 
+### Stage B: candidates filters and application history
+Spec: AC-70, AC-71. Tests: `test/candidates-filters.test.js`.
+- `/app/candidates` is now "my candidates, still being worked" by default. `active` means stage kinds new + progress (not onboarded). Everything is GET parameters (`owner`, `status`, `q`, `sort`, `page`); links leave defaults out. Kind comes from `role_stages.kind` with the legacy `applications.stage` as fallback for a row without a stage id. Counts on the status chips are ONE grouped query over the owner + search scope, and the page total is taken from it (no second COUNT).
+- Owner is resolved server-side: a rep can only ever get `me` or `all`; admins also get a user id (any existing user) or `none`. Unknown values quietly mean `me`.
+- Behaviour change to know about: existing bookmarks of `/app/candidates?q=...` now only search the signed-in user's active candidates. Add `owner=all&status=all` to get the old behaviour.
+- Stacked cards on phones use a generic `.table-stack` class with `data-label` on each cell (CSS `attr()`, no JS); the Users admin table uses it too.
+- History panel: one query for the other applications (with rep and last stage-change actor as subselects) plus one for their notes. Notes are rendered twice (a `<details>` for the screen and a plain block that is only shown in print), because browsers do not reliably print the content of a closed `<details>`.
+- Sample data: Tyler Reyes (earlier Premier League application, passed, two notes) and Daniel Okafor (earlier Lakers application, onboarded, two notes). The sample now holds 20 applications and 8 notes.
+- Candidate header: the email is rendered with a `<wbr>` before the @ (test allow-list gained `wbr`).
+
 ## 2.0.0 (Vercel + Turso + password sign-in)
 
 Contract: `docs/SCOPE-V2.md`. Spec and acceptance checks: `docs/SPEC.md` (AC-36 to AC-60 are new).

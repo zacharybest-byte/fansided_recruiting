@@ -84,7 +84,28 @@ Reps see every role (PTO cover). The dashboard defaults to "my roles".
    in-progress = FanSided Blue (one hue; the name tells them apart), Onboarded = green, Passed = gray.
 10. **Candidate** `/app/applications/:id`: header; Change stage (+ Voltax ID/date on Onboarded); Record Voltax;
     Move to another role; application details (resume link, sample links, answers, source); Notes;
-    **Compose email**; Activity (events + logged emails); History; admin-only Delete candidate.
+    **Compose email**; Activity (events + logged emails); admin-only Delete candidate.
+    - **Application history** (2.2.0, stage B): when the person has any other application, a full-width panel sits
+      directly under the stepper (before the two columns). One summary line ("Applied 3 times before: 1 onboarded,
+      1 passed, 1 still in progress."), then every other application newest first: role title and site, outcome badge
+      (Onboarded / Passed / still in <stage>) with the date that outcome was reached, applied date, assigned rep,
+      who last moved it, number of notes, the notes inline in a collapsed `<details>` ("Show 2 notes from this
+      application": author, friendly time, text) and "Open this application". The panel prints expanded. With no
+      other application the left column has one quiet line, "First application from this person." Notes are
+      already visible to every signed-in user; no new permission. Deleting a person deletes their applications, so
+      a deleted candidate has no history. A long email wraps at the @ in the header.
+    - **Candidates** `/app/candidates` (2.2.0, stage B): all state is in GET parameters (works without JS,
+      bookmarkable, defaults left out of links). `owner=`: `me` (default: roles whose assigned rep is the signed-in
+      user), `all`; admins also `owner=<user id>` and `owner=none` (roles without a rep). A rep passing another id,
+      `none` or junk gets their own list. Admins get a "Rep" select (active users + "Unassigned roles") with a Show
+      button. `status=`: `active` (default: kinds new + progress), `new`, `progress`, `onboarded`, `passed`, `all`;
+      unknown values fall back to active, so passed candidates are hidden until the "Passed" or "All statuses" chip
+      is used. Chips carry counts for the current owner + search scope (one grouped COUNT). `q` (name or email) and
+      `sort=stage_age` (longest in stage first; default most recently applied first) combine with both; pagination,
+      chips, the search form and the rep form preserve every parameter. A summary line says what is shown ("12 active
+      candidates on your roles"), "Clear filters" appears when anything is non-default, and empty states say what to
+      change. Columns: candidate (name, email), role and site, stage name with kind dot, rep, applied, days in
+      stage. Under 700 px the table becomes stacked cards (the Users admin table too).
     - Compose email: pick template, **Load** (GET `?template=ID`) fills subject/body with merge fields
       resolved (unknown `{{x}}` stays literal and shows a warning); rep edits; two submit buttons
       **Open in Gmail** and **Open in mail app** on a form with `target="_blank"`. The POST logs the email
@@ -319,7 +340,7 @@ Security and data
 - **AC-57** A body over 512 KB gets 413; over-length fields get field errors or 400 and are not stored.
 - **AC-58** SQL metacharacters (`' OR 1=1 --`, `"; DROP TABLE users; --`) in login, apply, notes, search/filter parameters and ids are stored/handled as plain text and change nothing else; non-numeric ids give 404.
 - **AC-59** Log output for apply, login failure, invite creation, webhook failure and delete candidate contains ids only (no applicant/user email or name, no token, no password).
-- **AC-60** Load sample data creates the flagged roles, people (all `@sample.invalid`) and applications in every stage; loading twice is refused; Remove sample data deletes them and leaves real roles, people and applications untouched; a rep gets 403 on both; two simultaneous loads give no 500 and exactly one set of data; a real applicant using `sample.one@example.com` is a normal applicant.
+- **AC-60** Load sample data creates the flagged roles, people (all `@sample.invalid`) and applications in every stage (two people also have an earlier application with notes); loading twice is refused; Remove sample data deletes them and leaves real roles, people and applications untouched; a rep gets 403 on both; two simultaneous loads give no 500 and exactly one set of data; a real applicant using `sample.one@example.com` is a normal applicant.
 
 Workflows and copying roles (2.2.0). Tested on both drivers in `test/workflow.test.js` and `test/migration.test.js`.
 - **AC-61** Migration 3 on a database at the previous schema with applications in all five legacy stages across several roles: every application points at the stage of its own role with the legacy value's name; all other tables and columns are unchanged and nothing is lost; running start-up twice is a no-op; a failure anywhere (including the tripwire) leaves the database exactly as it was; three concurrent migrators end with one workflow per role; the first request of the real app on an old database migrates it and the pages work.
@@ -331,6 +352,8 @@ Workflows and copying roles (2.2.0). Tested on both drivers in `test/workflow.te
 - **AC-67** Stage names are escaped on the board, stepper, badges, dashboard, search, forms, flashes and event log; a formula-like stage name is neutralised in the CSV; reps get 403 on every workflow/role admin route; the new forms require the CSRF token.
 - **AC-68** Duplicate: the roles list links `?copy=<id>`; the form is pre-filled (title "Copy of ", status Closed, questions with required flags, workflow, active rep); GET creates nothing; saving creates an independent role without candidates; malformed ids give the plain form; admin only.
 - **AC-69** Sample data: two of the six sample roles have their own workflows; removing the sample data also removes their stages (roles kept because of real applicants keep theirs).
+- **AC-70** Candidates tab (`test/candidates-filters.test.js`, both drivers): default owner is me and status active for reps and admins; `owner=all`; admin `owner=<id>` and `none`; a rep passing another id/none/junk gets their own list; every status value, default hides passed, unknown values fall back; chip counts follow owner and search; q, sort and page combine and every link keeps the other parameters; columns, stacked-card markup, Clear filters, empty states; XSS in q/owner/status/sort and in user names; signed-out redirect.
+- **AC-71** Application history: panel under the stepper with summary line, newest first, outcome badge and date, rep and last actor, note counts, collapsed notes (also rendered for print), "Open this application" links; escaped role titles and note text; no panel and the quiet line for a first-time applicant; no other person's applications; sample data gives two people a history; the long email wraps at the @.
 
 ## 11. Not in v2 (later)
 
