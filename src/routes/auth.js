@@ -23,15 +23,20 @@ const TOO_MANY = 'Too many attempts. Try again later.';
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
 
 function passwordFields({ label = 'New password', name = 'password', confirm = true } = {}) {
-  return html`<label>${label} <span class="muted">(${MIN_LENGTH}-${MAX_LENGTH} characters)</span>
-      <input type="password" name="${name}" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" autocomplete="new-password" required>
-    </label>
+  return html`<div class="field">
+      <label for="f-${name}">${label}</label>
+      <p class="help" id="help-${name}">${MIN_LENGTH} to ${MAX_LENGTH} characters.</p>
+      <input type="password" id="f-${name}" name="${name}" aria-describedby="help-${name}" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" autocomplete="new-password" required>
+    </div>
     ${confirm
-      ? html`<label>Repeat the password
-          <input type="password" name="${name}_confirm" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" autocomplete="new-password" required>
-        </label>`
+      ? html`<div class="field">
+          <label for="f-${name}-confirm">Repeat the password</label>
+          <input type="password" id="f-${name}-confirm" name="${name}_confirm" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" autocomplete="new-password" required>
+        </div>`
       : ''}`;
 }
+
+const errorBox = (error) => (error ? html`<p class="flash flash-error" role="alert">${error}</p>` : '');
 
 // Shared check for the two "new password" fields of setup, set-password and account.
 function checkNewPassword(form, name = 'password') {
@@ -46,18 +51,23 @@ function loginPage(ctx, { error, status = 200, email = '', next } = {}) {
   page(ctx, {
     title: 'Sign in',
     status,
-    body: html`<div class="narrow">
-      <h1>FanSided Recruit</h1>
-      ${error ? html`<p class="flash flash-error" role="alert">${error}</p>` : ''}
-      <form method="post" action="/login" class="stacked">
+    auth: true,
+    body: html`<h1>Sign in</h1>
+      ${errorBox(error)}
+      <form method="post" action="/login">
         ${publicField(ctx)}
         <input type="hidden" name="next" value="${next === undefined ? safeNext(ctx.query.get('next')) : next}">
-        <label>Email <input type="email" name="email" maxlength="254" value="${email}" autocomplete="username" required></label>
-        <label>Password <input type="password" name="password" maxlength="${MAX_LENGTH}" autocomplete="current-password" required></label>
-        <p><button type="submit" class="primary">Sign in</button></p>
+        <div class="field">
+          <label for="f-email">Email</label>
+          <input type="email" id="f-email" name="email" maxlength="254" value="${email}" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="f-password">Password</label>
+          <input type="password" id="f-password" name="password" maxlength="${MAX_LENGTH}" autocomplete="current-password" required>
+        </div>
+        <div class="form-actions"><button type="submit" class="btn btn-primary btn-block">Sign in</button></div>
       </form>
-      <p class="muted">Forgot your password? Ask an admin for a reset link.</p>
-    </div>`,
+      <p class="muted small">Forgot your password? Ask an admin for a reset link.</p>`,
   });
 }
 
@@ -131,17 +141,16 @@ function setupPage(ctx, token, { error, status = 200 } = {}) {
   page(ctx, {
     title: 'Set up',
     status,
-    body: html`<div class="narrow">
-      <h1>Set up FanSided Recruit</h1>
+    auth: true,
+    body: html`<h1>Set up FanSided Recruit</h1>
       <p>Choose a password for <strong>${ctx.app.config.adminEmail}</strong>. This becomes the first admin account.</p>
-      ${error ? html`<p class="flash flash-error" role="alert">${error}</p>` : ''}
-      <form method="post" action="/setup" class="stacked">
+      ${errorBox(error)}
+      <form method="post" action="/setup">
         ${publicField(ctx)}
         <input type="hidden" name="token" value="${token}">
         ${passwordFields()}
-        <p><button type="submit" class="primary">Create admin account</button></p>
-      </form>
-    </div>`,
+        <div class="form-actions"><button type="submit" class="btn btn-primary btn-block">Create admin account</button></div>
+      </form>`,
   });
 }
 
@@ -220,17 +229,16 @@ function setPasswordPage(ctx, token, email, { error, status = 200 } = {}) {
   page(ctx, {
     title: 'Set your password',
     status,
-    body: html`<div class="narrow">
-      <h1>Set your password</h1>
+    auth: true,
+    body: html`<h1>Set your password</h1>
       <p>Account: <strong>${email}</strong></p>
-      ${error ? html`<p class="flash flash-error" role="alert">${error}</p>` : ''}
-      <form method="post" action="/set-password" class="stacked">
+      ${errorBox(error)}
+      <form method="post" action="/set-password">
         ${publicField(ctx)}
         <input type="hidden" name="token" value="${token}">
         ${passwordFields()}
-        <p><button type="submit" class="primary">Save password</button></p>
-      </form>
-    </div>`,
+        <div class="form-actions"><button type="submit" class="btn btn-primary btn-block">Save password</button></div>
+      </form>`,
   });
 }
 
@@ -286,18 +294,29 @@ function accountPage(ctx, { error, status = 200 } = {}) {
   page(ctx, {
     title: 'Account',
     status,
-    body: html`<div class="narrow">
-      <h1>Account</h1>
-      <p>Signed in as <strong>${ctx.user.email}</strong>.</p>
-      <h2>Change password</h2>
-      ${error ? html`<p class="flash flash-error" role="alert">${error}</p>` : ''}
-      <form method="post" action="/app/account" class="stacked">
-        ${csrfField(ctx)}
-        <label>Current password <input type="password" name="current_password" maxlength="${MAX_LENGTH}" autocomplete="current-password" required></label>
-        ${passwordFields()}
-        <p><button type="submit" class="primary">Change password</button></p>
-      </form>
-    </div>`,
+    body: html`<div class="page-header">
+        <div>
+          <h1>Account</h1>
+          <dl class="meta-list">
+            <div><dt>Signed in as</dt><dd>${ctx.user.email}</dd></div>
+            <div><dt>Role</dt><dd>${ctx.user.role === 'admin' ? 'Admin' : 'Rep'}</dd></div>
+          </dl>
+        </div>
+      </div>
+      <section class="card wrap-narrow" aria-labelledby="change-password">
+        <h2 id="change-password">Change password</h2>
+        <p class="muted">Changing your password signs you out of other devices.</p>
+        ${errorBox(error)}
+        <form method="post" action="/app/account">
+          ${csrfField(ctx)}
+          <div class="field">
+            <label for="f-current_password">Current password</label>
+            <input type="password" id="f-current_password" name="current_password" maxlength="${MAX_LENGTH}" autocomplete="current-password" required>
+          </div>
+          ${passwordFields()}
+          <div class="form-actions"><button type="submit" class="btn btn-primary">Change password</button></div>
+        </form>
+      </section>`,
   });
 }
 

@@ -1,7 +1,7 @@
 'use strict';
 // Public pages: openings list, role page + apply form, thanks.
 const crypto = require('node:crypto');
-const { html, multiline } = require('../lib/render');
+const { html, raw } = require('../lib/render');
 const { page, HEARD_FROM } = require('../lib/layout');
 const { readForm } = require('../lib/http');
 const { publicField, verifyPublic } = require('../lib/csrf');
@@ -17,7 +17,9 @@ const RATE_WINDOW_MS = 60 * 60 * 1000;
 
 function excerpt(text, max = 160) {
   const line = String(text || '').split(/\r?\n/).find((l) => l.trim()) || '';
-  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(' '), max / 2)).trimEnd()}…`;
 }
 
 function sourceSuffix(source) {
@@ -50,26 +52,50 @@ async function openingsPage(ctx) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   }
+  const wanted = String(ctx.query.get('vertical') || '').trim();
+  const verticals = [...groups.keys()];
+  const filter = verticals.find((v) => v.toLowerCase() === wanted.toLowerCase()) || '';
+  const shown = filter ? [[filter, groups.get(filter)]] : [...groups];
+  const link = (vertical) => {
+    const params = new URLSearchParams();
+    if (vertical) params.set('vertical', vertical);
+    if (source) params.set('source', source);
+    const qs = params.toString();
+    return qs ? `/?${qs}` : '/';
+  };
+  const chip = (vertical, label) => html`<li><a class="chip" href="${link(vertical)}"${filter === vertical ? html` aria-current="true"` : ''}>${label}</a></li>`;
+
   page(ctx, {
     title: 'Open roles',
-    body: html`<h1>Write for FanSided</h1>
-      <p>We are looking for contributors. Pick a role below to apply.</p>
-      ${roles.length === 0 ? html`<p class="muted">There are no open roles right now. Please check back soon.</p>` : ''}
-      ${[...groups].map(
-        ([vertical, list]) => html`<section class="vertical">
-          <h2>${vertical}</h2>
-          <ul class="openings">
-            ${list.map(
-              (r) => html`<li>
-                <a href="/roles/${r.id}${sourceSuffix(source)}" class="role-title">${r.title}</a>
-                ${r.site_name ? html`<span class="muted"> · ${r.site_name}</span>` : ''}
-                <div class="excerpt">${excerpt(r.description)}</div>
-                <a href="/roles/${r.id}${sourceSuffix(source)}#apply">Apply</a>
-              </li>`
-            )}
-          </ul>
-        </section>`
-      )}`,
+    body: html`<div class="hero">
+        <h1 class="display">Write for FanSided</h1>
+        <p class="lede">Cover the teams and shows you know best for one of our fan sites. Pick a role, tell us about your writing and we will be in touch.</p>
+      </div>
+      ${roles.length === 0
+        ? html`<div class="empty">
+            <h2>No roles are open right now</h2>
+            <p>We open new roles throughout the year. Check back soon and your next application could be the one.</p>
+          </div>`
+        : html`${verticals.length > 1
+            ? html`<nav aria-label="Filter by vertical"><ul class="filter">${chip('', 'All roles')}${verticals.map((v) => chip(v, v))}</ul></nav>`
+            : ''}
+          ${shown.map(
+            ([vertical, list]) => html`<section class="vertical-group" aria-labelledby="v-${vertical.replace(/[^A-Za-z0-9]+/g, '-')}">
+              <h2 id="v-${vertical.replace(/[^A-Za-z0-9]+/g, '-')}">${vertical}<span class="count">${list.length} ${list.length === 1 ? 'role' : 'roles'}</span></h2>
+              <ul class="role-list">
+                ${list.map(
+                  (r) => html`<li class="role-row">
+                    <div class="role-row-main">
+                      <a href="/roles/${r.id}${sourceSuffix(source)}" class="role-title">${r.title}</a>
+                      ${r.site_name ? html`<span class="role-site">${r.site_name}</span>` : ''}
+                      <p class="role-desc">${excerpt(r.description)}</p>
+                    </div>
+                    <div class="role-row-action"><a class="btn btn-primary" href="/roles/${r.id}${sourceSuffix(source)}#apply" aria-label="Apply for ${r.title}">Apply</a></div>
+                  </li>`
+                )}
+              </ul>
+            </section>`
+          )}`}`,
   });
 }
 
@@ -77,65 +103,99 @@ function closedPage(ctx) {
   page(ctx, {
     title: 'Role closed',
     status: 404,
-    body: html`<h1>This role is no longer open</h1><p><a href="/">See all open roles</a></p>`,
+    body: html`<div class="wrap-read">
+      <h1 class="display">This role is no longer open</h1>
+      <p class="lede">It may have been filled or taken down. Other roles are still open.</p>
+      <p><a class="btn btn-primary" href="/">See all open roles</a></p>
+    </div>`,
   });
 }
 
 function fieldError(errors, name) {
-  return errors[name] ? html`<span class="error" id="err-${name}">${errors[name]}</span>` : '';
+  return errors[name] ? html`<p class="error" id="err-${name}">${errors[name]}</p>` : '';
+}
+
+// One labelled field. `control(attrs)` renders the input with the id, error and help wiring.
+function field(errors, name, label, { help = '', required = false } = {}, control) {
+  const id = `f-${name}`;
+  const describedBy = [help ? `help-${name}` : '', errors[name] ? `err-${name}` : ''].filter(Boolean).join(' ');
+  const attrs = raw(`id="${id}"${describedBy ? ` aria-describedby="${describedBy}"` : ''}${errors[name] ? ' aria-invalid="true"' : ''}`);
+  return html`<div class="field${errors[name] ? ' has-error' : ''}">
+    <label for="${id}">${label}${required ? html` <span class="req" aria-hidden="true">*</span><span class="visually-hidden"> (required)</span>` : ''}</label>
+    ${help ? html`<p class="help" id="help-${name}">${help}</p>` : ''}
+    ${control(attrs)}
+    ${fieldError(errors, name)}
+  </div>`;
+}
+
+function paragraphs(text) {
+  return String(text || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean).map((p) => html`<p>${p}</p>`);
 }
 
 function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {}) {
   const source = values.source !== undefined ? values.source : cleanSource(ctx.query.get('source'));
+  const fieldKeys = Object.keys(errors).filter((k) => k !== '_questions');
   const hasErrors = Object.keys(errors).length > 0;
   page(ctx, {
     title: role.title,
     status,
-    body: html`<p><a href="/${sourceSuffix(source)}">← All open roles</a></p>
-      <h1>${role.title}</h1>
-      <p class="muted">${role.vertical}${role.site_name ? ` · ${role.site_name}` : ''}</p>
-      ${multiline(role.description)}
-      <h2 id="apply">Apply</h2>
+    body: html`<a class="back" href="/${sourceSuffix(source)}">All open roles</a>
+      <div class="page-header">
+        <div>
+          <h1>${role.title}</h1>
+          <dl class="meta-list">
+            ${role.site_name ? html`<div><dt>Site</dt><dd>${role.site_name}</dd></div>` : ''}
+            <div><dt>Vertical</dt><dd>${role.vertical}</dd></div>
+          </dl>
+        </div>
+        <div class="page-actions"><a class="btn btn-primary" href="#apply">Apply for this role</a></div>
+      </div>
+      <div class="prose">${paragraphs(role.description)}</div>
+      <section class="apply-wrap" aria-labelledby="apply">
+      <h2 id="apply">Apply for this role</h2>
       ${hasErrors
-        ? html`<div class="flash flash-error" id="error-summary" tabindex="-1" role="alert">
-            ${errors._questions ? html`<p>${errors._questions}</p>` : html`<p>Please fix the highlighted fields below.</p>`}
+        ? html`<div class="error-summary" id="error-summary" tabindex="-1" role="alert">
+            <h2>There is a problem</h2>
+            ${errors._questions ? html`<p>${errors._questions}</p>` : ''}
+            ${fieldKeys.length
+              ? html`<p>Please fix ${fieldKeys.length === 1 ? 'this field' : 'these fields'} and send the form again.</p>
+                <ul>${fieldKeys.map((k) => html`<li><a href="#f-${k}">${errors[k]}</a></li>`)}</ul>`
+              : ''}
           </div>`
         : ''}
-      <form method="post" action="/roles/${role.id}/apply#apply" class="stacked" novalidate>
+      <form method="post" action="/roles/${role.id}/apply#apply" novalidate>
         ${publicField(ctx)}
         <input type="hidden" name="source" value="${source}">
         <input type="hidden" name="qv" value="${questionsVersion(role)}">
         <div class="hp" aria-hidden="true">
           <label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label>
         </div>
-        <label>Full name <span class="req">*</span>
-          <input type="text" name="name" maxlength="${LIMITS.name}" value="${values.name || ''}" required>
-        </label>${fieldError(errors, 'name')}
-        <label>Email <span class="req">*</span>
-          <input type="email" name="email" maxlength="${LIMITS.email}" value="${values.email || ''}" required>
-        </label>${fieldError(errors, 'email')}
-        <label>LinkedIn or portfolio URL <span class="muted">(https:// links only)</span>
-          <input type="text" inputmode="url" name="linkedin_url" maxlength="${LIMITS.linkedin}" value="${values.linkedin_url || ''}">
-        </label>${fieldError(errors, 'linkedin_url')}
-        <label>Resume link <span class="muted">(optional; a link to your resume, https:// only)</span>
-          <input type="text" inputmode="url" name="resume_url" maxlength="${LIMITS.resume}" value="${values.resume_url || ''}">
-        </label>${fieldError(errors, 'resume_url')}
-        <label>Writing sample links <span class="req">*</span> <span class="muted">(one URL per line)</span>
-          <textarea name="sample_links" rows="4" maxlength="${LIMITS.links}" required>${values.sample_links || ''}</textarea>
-        </label>${fieldError(errors, 'sample_links')}
-        ${role.questions.map(
-          (q, i) => html`<label>${q.text}${q.required ? html` <span class="req">*</span>` : ''}
-              <textarea name="answer_${i}" rows="4" maxlength="${LIMITS.answer}"${q.required ? html` required` : ''}>${(values.answers || [])[i] || ''}</textarea>
-            </label>${fieldError(errors, `answer_${i}`)}`
-        )}
-        <label>How did you hear about us?
-          <select name="heard_from">
-            <option value="">Choose one</option>
-            ${HEARD_FROM.map((h) => html`<option${values.heard_from === h ? html` selected` : ''}>${h}</option>`)}
-          </select>
-        </label>${fieldError(errors, 'heard_from')}
-        <p><button type="submit" class="primary">Submit application</button></p>
-      </form>`,
+        <fieldset class="form-section">
+          <legend>About you</legend>
+          ${field(errors, 'name', 'Full name', { required: true }, (a) => html`<input type="text" ${a} name="name" maxlength="${LIMITS.name}" value="${values.name || ''}" autocomplete="name" required>`)}
+          ${field(errors, 'email', 'Email', { required: true, help: 'We will only use this to reply about your application.' }, (a) => html`<input type="email" ${a} name="email" maxlength="${LIMITS.email}" value="${values.email || ''}" autocomplete="email" required>`)}
+          ${field(errors, 'linkedin_url', 'LinkedIn or portfolio URL', { help: 'A link starting with https://' }, (a) => html`<input type="text" ${a} inputmode="url" name="linkedin_url" maxlength="${LIMITS.linkedin}" value="${values.linkedin_url || ''}">`)}
+          ${field(errors, 'heard_from', 'How did you hear about us?', {}, (a) => html`<select ${a} name="heard_from">
+              <option value="">Choose one</option>
+              ${HEARD_FROM.map((h) => html`<option${values.heard_from === h ? html` selected` : ''}>${h}</option>`)}
+            </select>`)}
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>Your work</legend>
+          ${field(errors, 'sample_links', 'Writing samples', { required: true, help: 'Paste links to your best published work, one per line. Links must start with https://' }, (a) => html`<textarea ${a} name="sample_links" rows="4" maxlength="${LIMITS.links}" required>${values.sample_links || ''}</textarea>`)}
+          ${field(errors, 'resume_url', 'Resume link', { help: 'Optional. A link to your resume, starting with https://' }, (a) => html`<input type="text" ${a} inputmode="url" name="resume_url" maxlength="${LIMITS.resume}" value="${values.resume_url || ''}">`)}
+        </fieldset>
+        ${role.questions.length
+          ? html`<fieldset class="form-section">
+              <legend>Questions</legend>
+              ${role.questions.map((q, i) =>
+                field(errors, `answer_${i}`, q.text, { required: q.required }, (a) => html`<textarea ${a} name="answer_${i}" rows="4" maxlength="${LIMITS.answer}"${q.required ? html` required` : ''}>${(values.answers || [])[i] || ''}</textarea>`)
+              )}
+            </fieldset>`
+          : ''}
+        <div class="form-actions"><button type="submit" class="btn btn-primary">Send application</button></div>
+      </form>
+      </section>`,
   });
 }
 
@@ -307,7 +367,7 @@ async function applySubmit(ctx) {
     return page(ctx, {
       title: 'Too many submissions',
       status: 429,
-      body: html`<h1>Too many submissions</h1><p>You have sent too many applications in the last hour. Please try again later.</p>`,
+      body: html`<div class="wrap-read"><h1 class="display">Too many submissions</h1><p class="lede">You have sent too many applications in the last hour. Please try again later.</p><p><a href="/">Back to open roles</a></p></div>`,
     });
   }
   const applicationId = results[2].lastInsertRowid;
@@ -342,9 +402,11 @@ function register(router) {
   router.get('/thanks', (ctx) =>
     page(ctx, {
       title: 'Thank you',
-      body: html`<h1>Thank you for applying</h1>
-        <p>We have received your application. A member of our team will review it and get in touch if there is a fit.</p>
-        <p><a href="/">See other open roles</a></p>`,
+      body: html`<div class="thanks wrap-read">
+        <h1 class="display">Thank you for applying</h1>
+        <p class="lede">We have your application. An editor will read it and get in touch if there is a fit.</p>
+        <p><a class="btn btn-primary" href="/">See other open roles</a></p>
+      </div>`,
     })
   );
 }

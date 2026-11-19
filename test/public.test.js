@@ -33,17 +33,17 @@ after(() => t.close());
 test('AC-01: openings list groups open roles by vertical, hides closed ones, no login', async () => {
   const res = await t.client().get('/');
   assert.equal(res.status, 200);
-  assert.match(res.text, /<h2>NFL<\/h2>/);
-  assert.match(res.text, /<h2>NBA<\/h2>/);
+  assert.match(res.text, /<h2 id="v-NFL">NFL/);
+  assert.match(res.text, /<h2 id="v-NBA">NBA/);
   assert.match(res.text, /Bears Writer/);
   assert.match(res.text, /Hoops Writer/);
   assert.match(res.text, /Bears Wire/);
   assert.match(res.text, /First line of the bears job\./);
   assert.doesNotMatch(res.text, /Second line/); // one-line excerpt only
   assert.doesNotMatch(res.text, /Closed Prospects Role/);
-  assert.doesNotMatch(res.text, /<h2>MLB<\/h2>/);
+  assert.doesNotMatch(res.text, /<h2 id="v-MLB">/);
   // NFL group holds both NFL roles
-  const nflSection = res.text.split('<h2>NFL</h2>')[1].split('</section>')[0];
+  const nflSection = res.text.split('<h2 id="v-NFL">')[1].split('</section>')[0];
   assert.match(nflSection, /Bears Writer/);
   assert.match(nflSection, /Questionnaire Role/);
   assert.match(res.headers.get('content-security-policy'), /^default-src 'none'; script-src 'self'/);

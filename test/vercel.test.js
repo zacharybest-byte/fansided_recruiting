@@ -320,16 +320,16 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       assert.match(admin.lastHtml, /href="\/app\/admin\/sample"/);
       const load = await admin.post('/app/admin/sample/load');
       assert.equal(load.status, 303);
-      assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 3);
-      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
-      assert.equal(await count(t.db, 'people', "is_sample = 1 AND email LIKE 'sample.%@sample.invalid' AND name LIKE 'Sample % (demo)'"), 8);
+      assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 6);
+      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
+      assert.equal(await count(t.db, 'people', "is_sample = 1 AND email LIKE '%@sample.invalid' AND name NOT LIKE '%(demo)%' AND name NOT LIKE 'Sample%'"), 18);
       const stages = await t.db.all('SELECT DISTINCT stage FROM applications ORDER BY stage');
       assert.deepEqual(stages.map((s) => s.stage).filter((s) => s !== 'new').sort(), ['onboarded', 'passed', 'reviewing', 'trial']);
       assert.ok(stages.some((s) => s.stage === 'new'));
-      assert.equal(await count(t.db, 'job_roles', 'is_sample = 1 AND assigned_user_id = (SELECT id FROM users WHERE email = ?)', 'admin@fansided.com'), 3);
-      assert.equal(await count(t.db, 'notes', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 2);
-      assert.ok((await count(t.db, 'application_events', "type = 'stage_change'")) >= 8 + 5);
-      assert.equal(await count(t.db, 'applications', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 8);
+      assert.equal(await count(t.db, 'job_roles', 'is_sample = 1 AND assigned_user_id = (SELECT id FROM users WHERE email = ?)', 'admin@fansided.com'), 6);
+      assert.equal(await count(t.db, 'notes', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 4);
+      assert.ok((await count(t.db, 'application_events', "type = 'stage_change'")) >= 18 + 12);
+      assert.equal(await count(t.db, 'applications', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 18);
       // the pipeline pages render
       const roleRow = await t.db.get('SELECT id FROM job_roles WHERE is_sample = 1 ORDER BY id LIMIT 1');
       assert.equal((await admin.get(`/app/roles/${roleRow.id}`)).status, 200);
@@ -338,11 +338,11 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       await admin.get('/app/admin/sample');
       const again = await admin.post('/app/admin/sample/load');
       assert.equal(again.status, 303);
-      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
-      assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 3);
+      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
+      assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 6);
 
       // a real applicant to a sample role: the role is closed and kept on removal
-      const keepRole = (await t.db.get("SELECT id FROM job_roles WHERE is_sample = 1 AND title LIKE '%NBA%'")).id;
+      const keepRole = (await t.db.get("SELECT id FROM job_roles WHERE is_sample = 1 AND vertical = 'NBA'")).id;
       await t.db.run('UPDATE job_roles SET status = ? WHERE id = ?', ['open', keepRole]);
       assert.equal((await t.client().apply(keepRole, { name: 'Real Applicant', email: 'real2@fansided-test.com', answer_0: 'x' })).status, 303);
 
@@ -364,7 +364,7 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       // can be loaded again after removal
       await admin.get('/app/admin/sample');
       await admin.post('/app/admin/sample/load');
-      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
+      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
     } finally {
       await t.close();
     }

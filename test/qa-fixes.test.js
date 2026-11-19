@@ -66,7 +66,7 @@ describe(`[${driver}] QA fixes`, () => {
     assert.match(page.text, new RegExp(`action="/roles/${role}/apply#apply"`));
     const res = await c.apply(role, { name: '', answer_0: 'a' });
     assert.equal(res.status, 400);
-    assert.match(res.text, /<h2 id="apply">Apply<\/h2>\s*<div class="flash flash-error" id="error-summary" tabindex="-1" role="alert">/);
+    assert.match(res.text, /<h2 id="apply">Apply for this role<\/h2>\s*<div class="error-summary" id="error-summary" tabindex="-1" role="alert">/);
   });
 
   test('#4 only stored applications (and honeypot hits) count towards the rate limit', async () => {

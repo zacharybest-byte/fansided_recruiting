@@ -64,7 +64,7 @@ test('AC-29: admin creates a role with 5 questions, edits it and closes it; clos
   const pub = await t.client().get(`/roles/${role.id}`);
   assert.match(pub.text, /Question 5\?/);
   assert.doesNotMatch(pub.text, /sixth/);
-  assert.match(pub.text, /<div class="pre">Line 1\nLine 2<\/div>/);
+  assert.match(pub.text, /<p>Line 1\nLine 2<\/p>/);
 
   // Datalist of existing verticals on the form
   const form = await admin.get(`/app/admin/roles/${role.id}`);

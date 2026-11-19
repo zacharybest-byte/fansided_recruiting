@@ -10,7 +10,7 @@ const { MERGE_FIELDS } = require('../lib/email');
 const { randomToken, sha256Hex } = require('../lib/crypto');
 const { idParam } = require('./dashboard');
 const { rateKey } = require('../lib/ratelimit');
-const { loadSample, removeSample, sampleCounts } = require('../lib/sample');
+const { loadSample, removeSample, sampleCounts, ROLES, PEOPLE_COUNT } = require('../lib/sample');
 
 const MAX_QUESTIONS = 5;
 
@@ -282,15 +282,20 @@ async function samplePage(ctx) {
   const c = await sampleCounts(ctx.app.db);
   page(ctx, {
     title: 'Sample data',
-    body: html`<h1>Sample data</h1>
-      <p>For the team demo. Loads 3 sample roles and 8 clearly fake applicants (<code>Sample Applicant ... (demo)</code>, <code>@sample.invalid</code>)
-        spread across all five stages. Real data is never touched.</p>
-      <p>${c.loaded ? html`Sample data is loaded: ${c.roles} roles, ${c.people} people, ${c.applications} applications.` : 'No sample data is loaded.'}</p>
-      <form method="post" action="/app/admin/sample/load" class="inline">${csrfField(ctx)}
-        <button type="submit" class="primary"${c.loaded ? raw(' disabled') : ''}>Load sample data</button></form>
-      <form method="post" action="/app/admin/sample/remove" class="inline">${csrfField(ctx)}
-        <button type="submit" class="danger" data-confirm="Remove all sample roles, people and applications?"${c.loaded ? '' : raw(' disabled')}>Remove sample data</button></form>
-      <p class="muted">Removing deletes the sample people and everything attached to them. A sample role that already has a real application is closed and kept.</p>`,
+    body: html`<div class="page-header"><div><h1>Sample data</h1></div></div>
+      <div class="card wrap-read">
+        <h2>Demo records for trying the app</h2>
+        <p>Sample data fills Recruit with ${ROLES.length} open roles and ${PEOPLE_COUNT} candidates spread across every stage, so you can see how the dashboard, pipeline and candidate pages look when they are busy. The candidates are made up and use <code>@sample.invalid</code> addresses, which cannot receive email.</p>
+        <p>Your real roles and candidates are never touched. When you are done, remove the sample data in one step.</p>
+        <p><strong>${c.loaded ? `Sample data is loaded: ${c.roles} roles, ${c.people} candidates, ${c.applications} applications.` : 'No sample data is loaded.'}</strong></p>
+        <div class="form-actions">
+          <form method="post" action="/app/admin/sample/load" class="inline">${csrfField(ctx)}
+            <button type="submit" class="btn btn-primary"${c.loaded ? raw(' disabled') : ''}>Load sample data</button></form>
+          <form method="post" action="/app/admin/sample/remove" class="inline">${csrfField(ctx)}
+            <button type="submit" class="btn btn-danger" data-confirm="Remove all sample roles, candidates and applications?"${c.loaded ? '' : raw(' disabled')}>Remove sample data</button></form>
+        </div>
+        <p class="muted small">Removing deletes the sample candidates and everything attached to them. A sample role that has received a real application is closed and kept.</p>
+      </div>`,
   });
 }
 

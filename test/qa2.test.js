@@ -194,30 +194,30 @@ for (const driver of DRIVERS) {
         await admin.get('/app/admin/sample');
         const results = await Promise.all(Array.from({ length: 6 }, () => admin.post('/app/admin/sample/load')));
         assert.deepEqual(results.map((r) => r.status), Array(6).fill(303));
-        assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
-        assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 3);
-        assert.equal(await count(t.db, 'applications'), 8);
+        assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
+        assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 6);
+        assert.equal(await count(t.db, 'applications'), 18);
         const flashes = results.map((r) => r.headers.getSetCookie().find((c) => c.startsWith('flash=')));
         assert.ok(flashes.every(Boolean));
         // applying with a sample address is a normal field error
         const role = (await t.db.get('SELECT id FROM job_roles WHERE is_sample = 1 ORDER BY id LIMIT 1')).id;
-        const res = await t.client().apply(role, { email: 'sample.one@sample.invalid', answer_0: 'x' });
+        const res = await t.client().apply(role, { email: 'marcus.bennett@sample.invalid', answer_0: 'x' });
         assert.equal(res.status, 400);
         assert.match(res.text, /Please enter a valid email address\./);
-        assert.equal((await t.client().apply(role, { email: 'Sample.One@Sample.Invalid', answer_0: 'x' })).status, 400);
+        assert.equal((await t.client().apply(role, { email: 'Marcus.Bennett@Sample.Invalid', answer_0: 'x' })).status, 400);
         // a real person using the old-style sample address is a normal applicant, not sample data
         assert.equal((await t.client().apply(role, { email: 'sample.one@example.com', name: 'Really Sample', answer_0: 'x' })).status, 303);
-        assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
+        assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
         await admin.get('/app/admin/sample');
         assert.equal((await admin.post('/app/admin/sample/remove')).status, 303);
         assert.ok(await t.db.get("SELECT id FROM people WHERE email = 'sample.one@example.com'"));
         // and Load works again afterwards
         await admin.get('/app/admin/sample');
         await admin.post('/app/admin/sample/load');
-        assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
+        assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
         // a failed load is a flash message, not a 500
         await admin.post('/app/admin/sample/remove');
-        await t.db.run("INSERT INTO people (email, name, created_at, updated_at) VALUES ('sample.one@sample.invalid', 'Squatter', 'x', 'x')");
+        await t.db.run("INSERT INTO people (email, name, created_at, updated_at) VALUES ('marcus.bennett@sample.invalid', 'Squatter', 'x', 'x')");
         await admin.get('/app/admin/sample');
         const failed = await admin.post('/app/admin/sample/load');
         assert.equal(failed.status, 303);
@@ -284,8 +284,8 @@ for (const driver of DRIVERS) {
         await admin.get('/app/admin/sample');
         await admin.post('/app/admin/sample/load');
         const shown = await admin.get('/app/admin/sample');
-        assert.match(shown.text, /Loaded 3 sample roles and 8 sample people\./);
-        assert.doesNotMatch((await admin.get('/app/admin/sample')).text, /Loaded 3 sample roles/);
+        assert.match(shown.text, /Loaded 6 sample roles and 18 sample people\./);
+        assert.doesNotMatch((await admin.get('/app/admin/sample')).text, /Loaded 6 sample roles/);
         // A genuine cookie signed with another secret is refused.
         const { hmacHex } = require('../src/lib/crypto');
         const payload = Buffer.from(JSON.stringify({ type: 'ok', message: 'FORGED-3' })).toString('base64url');
