@@ -46,7 +46,7 @@ describe(`[${driver}] email composer`, () => {
     const page = await c.get(`/app/applications/${app.id}?template=${tpl}`);
     assert.match(page.text, /name="subject" maxlength="200" value="Hi Jamie re Bears Writer"/);
     assert.match(page.text, /Dear Jamie,\nBears Writer \/ Rita Rep \/ \{\{favourite_team\}\}<\/textarea>/);
-    assert.match(page.text, /id="merge-warning">Unknown merge field: \{\{favourite_team\}\}/);
+    assert.match(page.text, /id="merge-warning" role="alert">Unknown merge field: \{\{favourite_team\}\}/);
     const clean = (await t.db.get("SELECT id FROM email_templates WHERE name = 'Trial invite'")).id;
     const page2 = await c.get(`/app/applications/${app.id}?template=${clean}`);
     assert.doesNotMatch(page2.text, /merge-warning/);

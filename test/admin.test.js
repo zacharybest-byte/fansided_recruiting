@@ -19,6 +19,7 @@ before(async () => {
 after(() => t.close());
 
 function parseCsv(text) {
+  text = text.replace(/^\ufeff/, ''); // the export starts with a UTF-8 byte order mark
   const rows = [];
   let row = [];
   let cell = '';
@@ -206,6 +207,8 @@ test('AC-32: CSV export columns, one row per application, date filter, formula-i
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-type'), 'text/csv; charset=utf-8');
   assert.match(res.headers.get('content-disposition'), /^attachment; filename="fansided-applications-\d{4}-\d{2}-\d{2}\.csv"$/);
+  assert.deepEqual([...res.buffer.subarray(0, 3)], [0xef, 0xbb, 0xbf]); // UTF-8 BOM so Excel reads accented names
+  assert.ok(res.text.startsWith('\ufeffapplication_id,'));
   const rows = parseCsv(res.text);
   assert.deepEqual(rows[0], CSV_COLUMNS);
   assert.deepEqual(rows[0], ['application_id', 'applied_at', 'name', 'email', 'role_title', 'vertical', 'site_name', 'assigned_rep', 'source_tag', 'heard_from', 'stage', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url']);
@@ -229,7 +232,17 @@ test('AC-32: CSV export columns, one row per application, date filter, formula-i
   assert.deepEqual(filtered2.slice(1).map((r) => r[0]), [String(a2)]);
   const none = parseCsv((await admin.get('/app/export.csv?from=2020-01-01&to=2020-01-02')).text);
   assert.equal(none.length, 1);
-  assert.equal((await admin.get('/app/export.csv?from=nonsense')).status, 400);
+  // An invalid date or from > to re-renders the export form with an inline error (still a 400, never a bare error page).
+  const bad = await admin.get('/app/export.csv?from=nonsense');
+  assert.equal(bad.status, 400);
+  assert.match(bad.text, /<h1>Export applications<\/h1>/);
+  assert.match(bad.text, /id="err-from">Applied from must be a valid date\./);
+  assert.match(bad.text, /<a href="#f-from">Applied from must be a valid date\.<\/a>/);
+  const backwards = await admin.get('/app/export.csv?from=2026-03-12&to=2026-03-10');
+  assert.equal(backwards.status, 400);
+  assert.match(backwards.text, /id="err-to">Applied to must be on or after Applied from\./);
+  assert.match(backwards.text, /name="from" id="f-from" value="2026-03-12"/);
+  assert.equal(bad.headers.get('content-type').split(';')[0], 'text/html');
 
   // Reps can export too.
   const rep = t.client();

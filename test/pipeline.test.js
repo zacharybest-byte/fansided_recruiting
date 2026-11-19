@@ -78,7 +78,7 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
   await c.login('rep1@fansided.com');
   await c.get(`/app/roles/${roleA}`);
   const before = Date.now();
-  const res = await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', return_to: `/app/roles/${roleA}` });
+  const res = await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', from_stage: 'new', return_to: `/app/roles/${roleA}` });
   assert.equal(res.status, 303);
   assert.equal(res.headers.get('location'), `/app/roles/${roleA}`);
   let app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
@@ -93,13 +93,15 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
   assert.ok(Date.parse(e.at) >= before - 1000);
   assert.equal(app.stage_changed_at, e.at);
 
-  // Picking the current stage again does nothing.
-  await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing' });
+  // Picking the current stage again does nothing, and says so.
+  const same = await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', from_stage: 'reviewing' });
+  assert.equal(same.status, 303);
+  assert.match((await c.follow(same)).text, /Already in Reviewing\./);
   assert.equal(await count(t.db, 'application_events', 'application_id = ?', id), 2);
 
   const snapshot = JSON.stringify(await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]));
-  await c.post(`/app/applications/${id}/stage`, { stage: 'trial' });
-  await c.post(`/app/applications/${id}/stage`, { stage: 'passed' });
+  await c.post(`/app/applications/${id}/stage`, { stage: 'trial', from_stage: 'reviewing' });
+  await c.post(`/app/applications/${id}/stage`, { stage: 'passed', from_stage: 'trial' });
   events = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
   assert.equal(events.length, 4);
   assert.deepEqual(events.map((x) => [x.from_value, x.to_value]), [[null, 'new'], ['new', 'reviewing'], ['reviewing', 'trial'], ['trial', 'passed']]);
@@ -130,7 +132,7 @@ test('AC-22: Onboarded with Voltax ID and date saves both, sets onboarded_at and
     const page = await c.get(`/app/applications/${id}`);
     assert.match(page.text, /name="voltax_user_id"/);
     assert.match(page.text, /name="voltax_onboarded_on" value="\d{4}-\d{2}-\d{2}"/); // defaults to today
-    const res = await c.post(`/app/applications/${id}/stage`, { stage: 'onboarded', voltax_user_id: 'vx-777', voltax_onboarded_on: '2026-11-02' });
+    const res = await c.post(`/app/applications/${id}/stage`, { stage: 'onboarded', from_stage: 'new', voltax_user_id: 'vx-777', voltax_onboarded_on: '2026-11-02' });
     assert.equal(res.status, 303);
     const app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
     assert.equal(app.stage, 'onboarded');
@@ -155,12 +157,12 @@ test('AC-23: moving to another role changes where it appears, logs role_change, 
   const c = t.client();
   await c.login('rep1@fansided.com');
   await c.get(`/app/applications/${id}`);
-  await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing' });
+  await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', from_stage: 'new' });
   await c.post(`/app/applications/${id}/notes`, { body: 'Note before move' });
   await c.post(`/app/applications/${id}/email`, { via: 'gmail', subject: 'Hello', body: 'Body before move' });
   const eventsBefore = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
 
-  const res = await c.post(`/app/applications/${id}/role`, { role_id: String(roleB) });
+  const res = await c.post(`/app/applications/${id}/role`, { role_id: String(roleB), from_role_id: String(roleA) });
   assert.equal(res.status, 303);
   const app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
   assert.equal(app.role_id, roleB);
@@ -189,12 +191,12 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   const c = t.client();
   await c.login('rep2@fansided.com');
   await c.get(`/app/applications/${first}`);
-  await c.post(`/app/applications/${first}/stage`, { stage: 'passed' });
+  await c.post(`/app/applications/${first}/stage`, { stage: 'passed', from_stage: 'new' });
   await c.post(`/app/applications/${first}/notes`, { body: 'Good writer, wrong team' });
   await c.post(`/app/applications/${first}/email`, { via: 'gmail', subject: 'Earlier email', body: 'Sent on the first application' });
 
   const page1 = await c.get(`/app/applications/${first}`);
-  assert.match(page1.text, /Rep Two, \d{4}-\d{2}-\d{2} \d{2}:\d{2}/); // author and time
+  assert.match(page1.text, /Rep Two, [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M ET/); // author and friendly time with zone
   assert.match(page1.text, /Good writer, wrong team/);
 
   const second = await applyTo(roleB, 'REPEAT@example.com', 'Rae Peat');

@@ -78,7 +78,7 @@ for (const driver of DRIVERS) describe(`[${driver}] candidates search`, () => {
     const res = await rep.get('/app/candidates');
     assert.equal(res.status, 200);
     assert.deepEqual(rowsOf(res.text).map((r) => r.name), ['Underscore Neighbour', 'Under_score Person', '100% Real', 'Marcus Bennett', 'Maria Gonzalez']);
-    assert.match(res.text, /Most recent applications/);
+    assert.match(res.text, /5 applications, most recent first/);
   });
 
   test('signed-out visitors are redirected to sign in', async () => {

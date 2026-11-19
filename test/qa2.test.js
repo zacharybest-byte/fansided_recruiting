@@ -203,7 +203,7 @@ for (const driver of DRIVERS) {
         const role = (await t.db.get('SELECT id FROM job_roles WHERE is_sample = 1 ORDER BY id LIMIT 1')).id;
         const res = await t.client().apply(role, { email: 'marcus.bennett@sample.invalid', answer_0: 'x' });
         assert.equal(res.status, 400);
-        assert.match(res.text, /Please enter a valid email address\./);
+        assert.match(res.text, /Email must be a valid address/);
         assert.equal((await t.client().apply(role, { email: 'Marcus.Bennett@Sample.Invalid', answer_0: 'x' })).status, 400);
         // a real person using the old-style sample address is a normal applicant, not sample data
         assert.equal((await t.client().apply(role, { email: 'sample.one@example.com', name: 'Really Sample', answer_0: 'x' })).status, 303);

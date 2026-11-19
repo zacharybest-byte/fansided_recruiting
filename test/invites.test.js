@@ -7,7 +7,7 @@ const { verifyPassword } = require('../src/lib/password');
 
 const TOKEN_RE = /token=([A-Za-z0-9_-]{43})/;
 const sidOf = (c) => c.jar.get('sid');
-const GENERIC = /This link is no longer valid\. Ask an admin for a new one\./;
+const GENERIC = /<h1>This link is no longer valid<\/h1>\s*<p>Ask an admin to send you a new link\.<\/p>\s*<div class=\"form-actions\"><a class=\"btn btn-primary btn-block\" href=\"\/login\">Go to sign in<\/a>/;
 const NEW_PW = 'a brand new password 1';
 
 // Dump of every table, to prove a secret is stored nowhere.

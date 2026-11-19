@@ -116,7 +116,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: var(--sp-5) 0; }
 ul, ol { padding-left: 1.25rem; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; box-shadow: 0 0 0 5px var(--accent); }
 .masthead :focus-visible, .btn-primary:focus-visible, button.primary:focus-visible, .chip[aria-current]:focus-visible, .skip-link:focus-visible { outline-color: var(--accent); box-shadow: 0 0 0 5px var(--ink); }
-.masthead .nav a:focus-visible, .masthead-user a:focus-visible, .masthead-user button:focus-visible { outline-offset: -3px; box-shadow: none; }
+.masthead .nav a:focus-visible, .nav-menu-list a:focus-visible, .masthead-user a:focus-visible, .masthead-user button:focus-visible { outline-offset: -3px; box-shadow: none; }
 .btn-primary:focus-visible, button.primary:focus-visible { box-shadow: 0 0 0 5px var(--paper); outline-offset: 2px; }
 .masthead .wordmark:focus-visible { outline-offset: 2px; box-shadow: none; }
 .muted { color: var(--mute); }
@@ -163,36 +163,42 @@ body.is-public main { max-width: 1120px; padding-top: var(--sp-6); padding-botto
 .masthead-public .wordmark { font-size: 2rem; }
 
 .nav { display: flex; align-items: stretch; gap: var(--sp-1); align-self: stretch; }
-.nav a, .masthead-user a, .masthead-user .link {
+.nav a, .nav-menu-list a, .masthead-user a, .masthead-user .link {
   display: inline-flex; align-items: center; padding: 0 var(--sp-3); min-height: 2.75rem;
   font-size: var(--fs-sm); font-weight: 600; color: var(--paper); text-decoration: none; white-space: nowrap;
 }
-.nav a:hover, .masthead-user a:hover, .masthead-user .link:hover { background: #262626; }
-.nav a[aria-current="page"] { box-shadow: inset 0 -4px 0 var(--accent); }
+.nav a:hover, .nav-menu-list a:hover, .masthead-user a:hover, .masthead-user .link:hover { background: #262626; }
+.nav-bar a[aria-current="page"] { box-shadow: inset 0 -4px 0 var(--accent); }
 .nav-group { display: flex; align-items: stretch; gap: var(--sp-1); margin-left: var(--sp-3); padding-left: var(--sp-4); border-left: 1px solid #4a4a47; }
 .nav-label { display: inline-flex; align-items: center; font-size: var(--fs-xs); color: #b4b4af; padding-right: var(--sp-1); }
 .masthead-user { margin-left: auto; display: flex; align-items: center; gap: var(--sp-1); }
 .masthead-user form { margin: 0; display: inline-flex; }
 .masthead-user .link, .masthead-user button { background: none; border: 0; border-radius: 0; color: var(--paper); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; text-decoration: none; }
-@media (min-width: 1201px) { .masthead-app .masthead-inner { flex-wrap: nowrap; column-gap: var(--sp-4); } }
-@media (max-width: 1200px) {
-  .masthead-app .masthead-inner { row-gap: 0; }
-  /* Scroll hint: a soft light edge shows on whichever side has more links; it is covered (local) once you reach that end. */
-  .masthead-app .nav {
-    order: 3; flex: 0 0 100%; overflow-x: auto; margin: 0 calc(var(--gutter) * -1); padding: 0 var(--gutter); border-top: 1px solid #333; scrollbar-width: thin;
-    background-color: var(--ink);
-    background-image:
-      linear-gradient(to right, var(--ink), var(--ink)),
-      linear-gradient(to left, var(--ink), var(--ink)),
-      linear-gradient(to right, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0)),
-      linear-gradient(to left, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0));
-    background-position: left center, right center, left center, right center;
-    background-size: 1.5rem 100%, 1.5rem 100%, 1.75rem 100%, 1.75rem 100%;
-    background-repeat: no-repeat;
-    background-attachment: local, local, scroll, scroll;
-  }
+/* Wide screens: the link bar. Narrow screens: a no-JavaScript <details> menu that holds the same links.
+   Admin links are the widest set, so the switch point is chosen to fit them with the user name and Sign out. */
+.nav-menu { display: none; }
+.masthead-app .masthead-inner { flex-wrap: nowrap; column-gap: var(--sp-4); }
+@media (max-width: 1279px) {
+  .masthead-app .masthead-inner { flex-wrap: wrap; row-gap: 0; }
+  .masthead-app .nav-bar { display: none; }
   .masthead-user { order: 2; }
-  .nav-group { margin-left: var(--sp-2); padding-left: var(--sp-3); }
+  .nav-menu { display: block; order: 3; flex: 0 0 calc(100% + var(--gutter) * 2); margin: 0 calc(var(--gutter) * -1); border-top: 1px solid #333; }
+  .nav-menu > summary {
+    display: flex; align-items: center; gap: var(--sp-3); min-height: 2.75rem; padding: 0 var(--gutter); cursor: pointer;
+    font-size: var(--fs-sm); font-weight: 700; list-style: none; color: var(--paper);
+  }
+  .nav-menu > summary::-webkit-details-marker { display: none; }
+  .nav-menu > summary::after { content: ""; margin-left: auto; width: 0.55rem; height: 0.55rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-2px) rotate(45deg); }
+  .nav-menu[open] > summary::after { transform: translateY(2px) rotate(-135deg); }
+  .nav-menu > summary:hover { background: #262626; }
+  .nav-menu > summary:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; box-shadow: none; }
+  .nav-menu-current { font-weight: 400; color: #c9c9c4; }
+  .nav-menu-current::before { content: ""; display: inline-block; width: 0.5rem; height: 0.5rem; background: var(--accent); margin-right: var(--sp-2); }
+  .nav-menu-list { display: flex; flex-direction: column; padding: 0 0 var(--sp-3); background: #111; border-top: 1px solid #333; }
+  .nav-menu-list a { min-height: 2.75rem; padding: 0 var(--gutter); }
+  .nav-menu-list a[aria-current="page"] { box-shadow: inset 4px 0 0 var(--accent); background: #1c1c1c; }
+  .nav-menu-list .nav-group { display: flex; flex-direction: column; margin: var(--sp-2) 0 0; padding: var(--sp-2) 0 0; border-left: 0; border-top: 1px solid #333; }
+  .nav-menu-list .nav-label { padding: var(--sp-1) var(--gutter); }
 }
 @media (max-width: 520px) {
   .masthead-user .user-name { display: none; }
@@ -233,7 +239,9 @@ button.danger:hover, .btn-danger:hover, .button.danger:hover { background: var(-
 button.link.danger { color: var(--danger); background: none; border: 0; }
 .btn-sm { min-height: 2rem; padding: 0.2rem 0.75rem; font-size: var(--fs-xs); }
 .btn-block { display: flex; width: 100%; }
-button:disabled, .btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+button:disabled, .btn[aria-disabled="true"] { background: #ebebe8; border-color: #b5b5b0; color: #6b6b67; cursor: not-allowed; }
+button:disabled:hover, .btn[aria-disabled="true"]:hover { background: #ebebe8; }
+.btn-danger:disabled, button.danger:disabled { background: #ebebe8; border-color: #b5b5b0; color: #6b6b67; }
 @media (prefers-reduced-motion: no-preference) { button, .btn, .nav a, .chip { transition: background-color 0.12s ease; } }
 
 /* ---------- Forms ---------- */
@@ -327,7 +335,7 @@ table.data th { font-weight: 700; font-size: var(--fs-xs); color: var(--mute); b
 table.data tbody tr:last-child td { border-bottom: 0; }
 table.data tbody tr:hover { background: #fafaf8; }
 table.data .num, table.data th.num { text-align: right; }
-table.data td.wrap { word-break: break-all; }
+table.data td.wrap { overflow-wrap: anywhere; min-width: 12rem; }
 .table-wrap > table.data { min-width: 40rem; }
 td.highlight { background: var(--accent); color: var(--on-accent); font-weight: 800; }
 tr.clickable { cursor: pointer; }
@@ -597,3 +605,44 @@ td form.inline.nowrap select { min-width: 5.5rem; }
 .page-header + .summary-strip, .page-header + .role-bar { margin-top: 0; }
 .public-intro { margin: 0; }
 .candidate-header .page-header > div:first-child { flex: 1 1 28rem; }
+
+/* ---------- QA fixes ---------- */
+/* dashboard role card title is an h2 (outline) that looks like the old link */
+.role-heading { font-size: var(--fs-lg); line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
+.role-row-app .role-heading .role-title { display: inline; }
+/* destructive link in a table row: reads like button.link.danger but goes to a confirmation page */
+.danger-link { color: var(--danger); font-weight: 600; }
+.danger-link:hover { background: var(--danger-bg); }
+/* template picker: a roomy select that wraps the button underneath when the card is narrow */
+.template-load select { flex: 1 1 14rem; }
+/* error summary inside a narrow card */
+.card .error-summary h2 { font-size: var(--fs-base); }
+.error-summary { scroll-margin-top: var(--sp-4); }
+main:focus { outline: none; }
+
+/* stage counter: two rows (3 + 2) when five columns would clip the labels */
+@media (max-width: 400px) {
+  .stage-counter { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: var(--sp-2); }
+  .stage-seg-l { overflow: visible; text-overflow: clip; white-space: nowrap; }
+}
+
+/* tap targets on small screens: 44px controls, 40px for text links (padding, so lists stay compact) */
+@media (max-width: 600px) {
+  button, .btn, .button, .chip { min-height: 2.75rem; }
+  .btn-sm { min-height: 2.75rem; }
+  .cand-move select, .cand-move button { min-height: 2.75rem; font-size: var(--fs-sm); }
+  .cand-move button { padding-left: var(--sp-4); padding-right: var(--sp-4); }
+  input[type=text], input[type=email], input[type=url], input[type=date], input[type=password], input[type=search], input[type=number], select { min-height: 2.75rem; }
+  form.inline select, form.inline input[type=text], form.inline input[type=email] { min-height: 2.75rem; }
+  button.link, .btn-quiet { min-height: 2.5rem; display: inline-flex; align-items: center; padding: 0 var(--sp-2); }
+  button.link { padding: 0 var(--sp-1); }
+  .back { display: inline-flex; align-items: center; min-height: 2.75rem; }
+  .row-actions a, .danger-link, .pager a, .footer a, .cand-name, .role-title, .tile-title a { display: inline-flex; align-items: center; min-height: 2.5rem; }
+  .cand-name { display: flex; }
+  .role-heading .role-title { display: inline-flex; }
+  .table-wrap table.data td a { display: inline-block; padding: 0.5rem 0; }
+  .masthead-user .link, .masthead-user a { min-height: 2.75rem; }
+  .nav-menu > summary { min-height: 2.75rem; }
+  .check { min-height: 2.75rem; }
+  .check input { width: 1.4rem; height: 1.4rem; }
+}

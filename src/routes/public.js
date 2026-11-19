@@ -2,7 +2,7 @@
 // Public pages: openings list, role page + apply form, thanks.
 const crypto = require('node:crypto');
 const { html, raw } = require('../lib/render');
-const { page, HEARD_FROM } = require('../lib/layout');
+const { page, HEARD_FROM, errorSummary } = require('../lib/layout');
 const { readForm } = require('../lib/http');
 const { publicField, verifyPublic } = require('../lib/csrf');
 const { nowIso } = require('../lib/db');
@@ -140,10 +140,16 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
   const source = values.source !== undefined ? values.source : cleanSource(ctx.query.get('source'));
   const fieldKeys = Object.keys(errors).filter((k) => k !== '_questions');
   const hasErrors = Object.keys(errors).length > 0;
+  // The summary sits at the very top of the page and the form posts to a URL without a fragment, so the page loads
+  // at the summary even without JavaScript, and public/app.js moves focus to it.
+  const summary = errorSummary(
+    fieldKeys.map((k) => ({ id: `f-${k}`, text: errors[k] })),
+    { intro: errors._questions || (fieldKeys.length ? `Please fix ${fieldKeys.length === 1 ? 'this field' : 'these fields'} and send the form again.` : '') }
+  );
   page(ctx, {
     title: role.title,
     status,
-    body: html`<a class="back" href="/${sourceSuffix(source)}">All open roles</a>
+    body: html`${hasErrors ? summary : ''}<a class="back" href="/${sourceSuffix(source)}">All open roles</a>
       <div class="page-header">
         <div>
           <h1>${role.title}</h1>
@@ -152,22 +158,12 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
             <div><dt>Vertical</dt><dd>${role.vertical}</dd></div>
           </dl>
         </div>
-        <div class="page-actions"><a class="btn btn-primary" href="#apply">Apply for this role</a></div>
+        <div class="page-actions"><a class="btn btn-primary" href="#apply">Go to application form</a></div>
       </div>
       <div class="prose">${paragraphs(role.description)}</div>
       <section class="apply-wrap" aria-labelledby="apply">
       <h2 id="apply">Apply for this role</h2>
-      ${hasErrors
-        ? html`<div class="error-summary" id="error-summary" tabindex="-1" role="alert">
-            <h2>There is a problem</h2>
-            ${errors._questions ? html`<p>${errors._questions}</p>` : ''}
-            ${fieldKeys.length
-              ? html`<p>Please fix ${fieldKeys.length === 1 ? 'this field' : 'these fields'} and send the form again.</p>
-                <ul>${fieldKeys.map((k) => html`<li><a href="#f-${k}">${errors[k]}</a></li>`)}</ul>`
-              : ''}
-          </div>`
-        : ''}
-      <form method="post" action="/roles/${role.id}/apply#apply" novalidate>
+      <form method="post" action="/roles/${role.id}/apply" novalidate>
         ${publicField(ctx)}
         <input type="hidden" name="source" value="${source}">
         <input type="hidden" name="qv" value="${questionsVersion(role)}">
@@ -233,6 +229,12 @@ function validEmail(email) {
   return !e.endsWith(`@${SAMPLE_DOMAIN}`);
 }
 
+// A question's text in quotes, shortened so a long question does not fill the error summary.
+function quoted(text) {
+  const t = String(text).replace(/\s+/g, ' ').trim();
+  return `"${t.length > 50 ? `${t.slice(0, 50).trimEnd()}…` : t}"`;
+}
+
 function validate(form, role) {
   const errors = {};
   const values = {
@@ -246,37 +248,37 @@ function validate(form, role) {
     answers: role.questions.map((_, i) => form.get(`answer_${i}`).replace(/\r\n/g, '\n').trim()),
   };
 
-  if (!values.name) errors.name = 'Please enter your full name.';
-  else if (values.name.length > LIMITS.name) errors.name = `Name must be at most ${LIMITS.name} characters.`;
+  if (!values.name) errors.name = 'Full name is required.';
+  else if (values.name.length > LIMITS.name) errors.name = `Full name must be at most ${LIMITS.name} characters.`;
 
-  if (!values.email) errors.email = 'Please enter your email address.';
-  else if (!validEmail(values.email)) errors.email = 'Please enter a valid email address.';
+  if (!values.email) errors.email = 'Email is required.';
+  else if (!validEmail(values.email)) errors.email = 'Email must be a valid address, like name@example.com.';
 
   let linkedin = '';
   if (values.linkedin_url) {
-    if (values.linkedin_url.length > LIMITS.linkedin) errors.linkedin_url = `Must be at most ${LIMITS.linkedin} characters.`;
-    else if (!(linkedin = normaliseUrl(values.linkedin_url))) errors.linkedin_url = 'Please enter a valid https:// URL.';
+    if (values.linkedin_url.length > LIMITS.linkedin) errors.linkedin_url = `LinkedIn or portfolio URL must be at most ${LIMITS.linkedin} characters.`;
+    else if (!(linkedin = normaliseUrl(values.linkedin_url))) errors.linkedin_url = 'LinkedIn or portfolio URL must be a valid link starting with https://';
   }
 
   let resume = '';
   if (values.resume_url) {
-    if (values.resume_url.length > LIMITS.resume) errors.resume_url = `Must be at most ${LIMITS.resume} characters.`;
-    else if (!(resume = normaliseUrl(values.resume_url))) errors.resume_url = 'Please enter a valid https:// URL.';
+    if (values.resume_url.length > LIMITS.resume) errors.resume_url = `Resume link must be at most ${LIMITS.resume} characters.`;
+    else if (!(resume = normaliseUrl(values.resume_url))) errors.resume_url = 'Resume link must be a valid link starting with https://';
   }
 
   const links = values.sample_links.split('\n').map((l) => l.trim()).filter(Boolean);
   const normalisedLinks = links.map(normaliseUrl);
-  if (values.sample_links.length > LIMITS.links) errors.sample_links = `Links must be at most ${LIMITS.links} characters in total.`;
-  else if (links.length === 0) errors.sample_links = 'Please add at least one writing sample link.';
-  else if (normalisedLinks.some((l) => !l)) errors.sample_links = 'Each line must be a valid https:// URL.';
+  if (values.sample_links.length > LIMITS.links) errors.sample_links = `Writing samples must be at most ${LIMITS.links} characters in total.`;
+  else if (links.length === 0) errors.sample_links = 'Writing samples needs at least one link.';
+  else if (normalisedLinks.some((l) => !l)) errors.sample_links = 'Each line in Writing samples must be a valid link starting with https://';
 
   role.questions.forEach((q, i) => {
     const a = values.answers[i];
-    if (q.required && !a) errors[`answer_${i}`] = 'This question is required.';
-    else if (a.length > LIMITS.answer) errors[`answer_${i}`] = `Answers must be at most ${LIMITS.answer} characters.`;
+    if (q.required && !a) errors[`answer_${i}`] = `${quoted(q.text)} needs an answer.`;
+    else if (a.length > LIMITS.answer) errors[`answer_${i}`] = `The answer to ${quoted(q.text)} must be at most ${LIMITS.answer} characters.`;
   });
 
-  if (values.heard_from && !HEARD_FROM.includes(values.heard_from)) errors.heard_from = 'Please pick one of the options.';
+  if (values.heard_from && !HEARD_FROM.includes(values.heard_from)) errors.heard_from = 'How did you hear about us? needs one of the listed options.';
 
   return {
     errors,
@@ -309,7 +311,7 @@ async function applySubmit(ctx) {
   // Honeypot: pretend it worked, save nothing (still counts towards the rate limit).
   if (form.get('website').trim()) {
     await reserve(db, [spec]);
-    return ctx.redirect('/thanks#top');
+    return ctx.redirect('/thanks');
   }
 
   const { errors, values, clean } = validate(form, role);
@@ -385,8 +387,7 @@ async function applySubmit(ctx) {
     applicationId,
     baseUrl: ctx.baseUrl(),
   });
-  // The form's action carries #apply, which a redirect without a fragment would inherit.
-  ctx.redirect('/thanks#top');
+  ctx.redirect('/thanks');
 }
 
 function register(router) {

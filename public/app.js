@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  // Bring the apply form's error summary into view and focus.
+  // Bring the error summary (apply form and admin forms) into view and focus.
   var summary = document.getElementById('error-summary');
   if (summary) summary.focus();
 
@@ -15,13 +15,6 @@
     }
   }
 
-  // Ask before destructive actions.
-  document.addEventListener('submit', function (e) {
-    var btn = e.submitter;
-    var msg = btn && btn.getAttribute('data-confirm');
-    if (msg && !window.confirm(msg)) e.preventDefault();
-  });
-
   // Show the Voltax fields only when "Onboarded" is picked.
   document.querySelectorAll('.voltax-fields[data-show-for]').forEach(function (box) {
     var form = box.closest('form');
@@ -29,7 +22,7 @@
     if (!select) return;
     var update = function () {
       var want = box.getAttribute('data-show-for');
-      box.hidden = select.value !== want || box.getAttribute('data-current') === want;
+      box.hidden = select.value !== want;
     };
     select.addEventListener('change', update);
     update();

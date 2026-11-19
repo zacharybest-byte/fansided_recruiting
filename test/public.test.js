@@ -106,7 +106,7 @@ test('AC-04: role page shows exactly its questions; a missing required answer ke
   const before = await count(t.db, 'applications');
   const res = await c.apply(qRole, { name: 'Kept Name', email: 'kept@example.com', sample_links: 'https://kept.example.com/a', answer_0: '', answer_1: 'Kept optional answer' });
   assert.equal(res.status, 400);
-  assert.match(res.text, /id="err-answer_0"[^>]*>This question is required/);
+  assert.match(res.text, /id="err-answer_0"[^>]*>&quot;Why this team\?&quot; needs an answer\./);
   assert.match(res.text, /value="Kept Name"/);
   assert.match(res.text, /value="kept@example.com"/);
   assert.match(res.text, /https:\/\/kept.example.com\/a<\/textarea>/);
@@ -131,7 +131,7 @@ test('AC-06: valid submission creates one New application with one system stage_
   const before = await count(t.db, 'applications');
   const res = await c.apply(openNfl, { name: 'Valid Person', email: 'valid@example.com' });
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/thanks#top');
+  assert.equal(res.headers.get('location'), '/thanks');
   assert.equal(await count(t.db, 'applications'), before + 1);
   const app = await lastApplication(t.db);
   assert.equal(app.stage, 'new');
@@ -264,7 +264,7 @@ test('AC-11: honeypot shows thanks and stores nothing; 11th submission from one 
   const peopleBefore = await count(t.db, 'people');
   const res = await c.apply(openNfl, { email: 'bot@example.com', website: 'http://spam.example.com' });
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/thanks#top');
+  assert.equal(res.headers.get('location'), '/thanks');
   assert.equal(await count(t.db, 'applications'), before);
   assert.equal(await count(t.db, 'people'), peopleBefore);
 

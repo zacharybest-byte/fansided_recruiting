@@ -12,6 +12,7 @@ const { idParam, stageSelect } = require('./dashboard');
 const voltax = require('../voltax');
 
 const LIMITS = { note: 10000, subject: 200, body: 4000 };
+const STALE = 'Someone else changed this candidate at the same time. Nothing was saved: please check the page and try again.';
 
 async function loadApplication(db, id) {
   const app = await db.get(
@@ -153,19 +154,22 @@ async function candidatePage(ctx) {
 
       <div class="col">
         <section class="card">
-          <h2>Change stage</h2>
+          <h2>Move to another stage</h2>
           <form method="post" action="/app/applications/${app.id}/stage" id="stage-form">
             ${csrfField(ctx)}
+            <input type="hidden" name="from_stage" value="${app.stage}">
             <div class="field">
-              <label for="f-stage">New stage</label>
+              <label for="f-stage">Stage</label>
               <select name="stage" id="f-stage">${STAGES.map((st) => html`<option value="${st}"${st === app.stage ? raw(' selected') : ''}>${STAGE_LABELS[st]}</option>`)}</select>
             </div>
-            <div class="voltax-fields" data-show-for="onboarded" data-current="${app.stage}">
-              <p class="help muted">When moving to Onboarded, record the Voltax account. The Voltax API is not connected yet, so enter it by hand.</p>
-              <div class="field"><label for="f-voltax">Voltax user ID</label><input type="text" id="f-voltax" name="voltax_user_id" maxlength="100"></div>
-              <div class="field"><label for="f-voltax-on">Onboarded date</label><input type="date" id="f-voltax-on" name="voltax_onboarded_on" value="${today}"></div>
-            </div>
-            <div class="form-actions"><button type="submit" class="btn btn-primary">Save stage</button></div>
+            ${app.stage === 'onboarded'
+              ? ''
+              : html`<div class="voltax-fields" data-show-for="onboarded">
+                  <p class="help muted" id="help-voltax">Only used when moving to Onboarded. The Voltax API is not connected yet, so enter the account by hand.</p>
+                  <div class="field"><label for="f-voltax">Voltax user ID</label><input type="text" id="f-voltax" name="voltax_user_id" maxlength="100" aria-describedby="help-voltax"></div>
+                  <div class="field"><label for="f-voltax-on">Onboarded date</label><input type="date" id="f-voltax-on" name="voltax_onboarded_on" value="${today}"></div>
+                </div>`}
+            <div class="form-actions"><button type="submit" class="btn btn-primary">Move</button></div>
           </form>
           ${app.stage === 'onboarded'
             ? html`<h3 id="voltax">Voltax</h3>
@@ -179,7 +183,7 @@ async function candidatePage(ctx) {
                   <div class="field"><label for="f-voltax-id2">Voltax user ID</label><input type="text" id="f-voltax-id2" name="voltax_user_id" maxlength="100" value="${app.voltax_user_id || ''}" required></div>
                   <div class="field"><label for="f-voltax-on2">Date</label><input type="date" id="f-voltax-on2" name="voltax_onboarded_on" value="${app.voltax_onboarded_on || today}"></div>
                 </div>
-                <div class="form-actions"><button type="submit" class="btn btn-secondary">Record Voltax details</button></div>
+                <div class="form-actions"><button type="submit" class="btn btn-secondary">Update Voltax details</button></div>
               </form>`
             : ''}
         </section>
@@ -188,6 +192,7 @@ async function candidatePage(ctx) {
           <h2>Move to another role</h2>
           <form method="post" action="/app/applications/${app.id}/role">
             ${csrfField(ctx)}
+            <input type="hidden" name="from_role_id" value="${app.role_id}">
             <div class="field">
               <label for="f-role">Role</label>
               <select name="role_id" id="f-role">
@@ -231,7 +236,7 @@ async function candidatePage(ctx) {
             <button type="submit" class="btn btn-secondary">Load template</button>
           </form>
           ${draft.unknown.length
-            ? html`<p class="flash flash-error" id="merge-warning">Unknown merge field${draft.unknown.length > 1 ? 's' : ''}: ${draft.unknown.map((u) => `{{${u}}}`).join(', ')}. Fix ${draft.unknown.length > 1 ? 'them' : 'it'} before sending.</p>`
+            ? html`<p class="flash flash-error" id="merge-warning" role="alert">Unknown merge field${draft.unknown.length > 1 ? 's' : ''}: ${draft.unknown.map((u) => `{{${u}}}`).join(', ')}. Fix ${draft.unknown.length > 1 ? 'them' : 'it'} before sending.</p>`
             : ''}
           <form method="post" action="/app/applications/${app.id}/email" target="_blank">
             ${csrfField(ctx)}
@@ -287,7 +292,17 @@ async function changeStage(ctx) {
     setFlash(ctx, 'error', stage === '' ? 'Choose a stage to move this candidate to.' : 'Unknown stage.');
     return ctx.redirect(back);
   }
-  if (stage === app.stage) return ctx.redirect(back); // picking the current stage again does nothing
+  // The form carries the stage the page showed. If the candidate has moved on since (another tab, another rep), or
+  // the field is missing or not a stage, nothing is written: this is "stale", never a silent overwrite.
+  const fromStage = ctx.form.get('from_stage');
+  if (!STAGES.includes(fromStage) || fromStage !== app.stage) {
+    setFlash(ctx, 'error', STALE);
+    return ctx.redirect(back);
+  }
+  if (stage === fromStage) {
+    setFlash(ctx, 'ok', `Already in ${STAGE_LABELS[stage]}.`);
+    return ctx.redirect(back);
+  }
 
   const voltaxId = ctx.form.get('voltax_user_id').trim().slice(0, 100);
   let voltaxOn = ctx.form.get('voltax_onboarded_on').trim();
@@ -301,11 +316,12 @@ async function changeStage(ctx) {
   // compared against; the UPDATE carries the same guard, so a concurrent change produces no event rows.
   const now = nowIso();
   const guard = 'EXISTS (SELECT 1 FROM applications WHERE id = ? AND stage = ?)';
+  // fromStage (the value the form was rendered with) is the compare-and-swap value in every statement below.
   const statements = [
     {
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
             SELECT ?, 'stage_change', ?, ?, ?, ? WHERE ${guard}`,
-      args: [id, app.stage, stage, ctx.user.id, now, id, app.stage],
+      args: [id, fromStage, stage, ctx.user.id, now, id, fromStage],
     },
   ];
   const recordVoltaxHere = stage === 'onboarded' && voltaxId;
@@ -313,7 +329,7 @@ async function changeStage(ctx) {
     statements.push({
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
             SELECT ?, 'voltax_recorded', (SELECT voltax_user_id FROM applications WHERE id = ?), ?, ?, ? WHERE ${guard}`,
-      args: [id, id, `${voltaxId} (onboarded ${voltaxOn})`, ctx.user.id, now, id, app.stage],
+      args: [id, id, `${voltaxId} (onboarded ${voltaxOn})`, ctx.user.id, now, id, fromStage],
     });
   }
   const sets = ['stage = ?', 'stage_changed_at = ?'];
@@ -326,14 +342,14 @@ async function changeStage(ctx) {
       setArgs.push(voltaxId, voltaxOn);
     }
   }
-  statements.push({ sql: `UPDATE applications SET ${sets.join(', ')} WHERE id = ? AND stage = ?`, args: [...setArgs, id, app.stage] });
+  statements.push({ sql: `UPDATE applications SET ${sets.join(', ')} WHERE id = ? AND stage = ?`, args: [...setArgs, id, fromStage] });
   const results = await db.batch(statements);
   if (results[results.length - 1].changes === 0) {
-    setFlash(ctx, 'error', 'Someone else changed this candidate at the same time. Nothing was saved: please check the page and try again.');
+    setFlash(ctx, 'error', STALE);
     return ctx.redirect(back);
   }
 
-  let message = `Moved ${person.name} to ${STAGE_LABELS[stage]}.`;
+  let message = `Moved "${person.name}" to ${STAGE_LABELS[stage]}.`;
   if (stage === 'onboarded') {
     try {
       const result = await voltax.createUser(person, { ...app, stage, voltax_user_id: voltaxId || app.voltax_user_id });
@@ -379,13 +395,21 @@ async function recordVoltax(ctx) {
 async function moveRole(ctx) {
   const { db } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app } = await loadApplication(db, id);
+  const { app, person } = await loadApplication(db, id);
   const target = await db.get('SELECT id, title FROM job_roles WHERE id = ?', [Number(ctx.form.get('role_id'))]);
   if (!target) {
     setFlash(ctx, 'error', 'Pick a role.');
     return ctx.redirect(`/app/applications/${id}`);
   }
-  if (target.id === app.role_id) return ctx.redirect(`/app/applications/${id}`);
+  // Same idea as the stage form: the role the page showed must still be the current one.
+  if (ctx.form.get('from_role_id') !== String(app.role_id)) {
+    setFlash(ctx, 'error', STALE);
+    return ctx.redirect(`/app/applications/${id}`);
+  }
+  if (target.id === app.role_id) {
+    setFlash(ctx, 'ok', `Already in ${target.title}.`);
+    return ctx.redirect(`/app/applications/${id}`);
+  }
   const now = nowIso();
   // Event first, guarded by the role we compared against; the UPDATE carries the same guard.
   const results = await db.batch([
@@ -396,8 +420,8 @@ async function moveRole(ctx) {
     },
     { sql: 'UPDATE applications SET role_id = ? WHERE id = ? AND role_id = ?', args: [target.id, id, app.role_id] },
   ]);
-  if (results[1].changes === 0) setFlash(ctx, 'error', 'Someone else changed this candidate at the same time. Nothing was saved.');
-  else setFlash(ctx, 'ok', `Moved to ${target.title}.`);
+  if (results[1].changes === 0) setFlash(ctx, 'error', STALE);
+  else setFlash(ctx, 'ok', `Moved "${person.name}" to ${target.title}.`);
   ctx.redirect(`/app/applications/${id}`);
 }
 
@@ -448,7 +472,7 @@ async function logEmail(ctx) {
       <p>If nothing opens, use the button below. Recruit has recorded that you opened this email for ${person.name}.</p>
       <div class="form-actions">
         <a href="${href}" data-auto-open id="compose-link" class="btn btn-primary">Open the compose window</a>
-        <a class="btn btn-secondary" href="/app/applications/${app.id}#activity">Back to ${person.name}</a>
+        <a class="btn btn-secondary" href="/app/applications/${app.id}#activity">Back to candidate</a>
       </div>
     </div>`,
   });
@@ -470,7 +494,7 @@ async function deleteConfirm(ctx) {
       <p><strong>This cannot be undone.</strong></p>
       <form method="post" action="/app/people/${person.id}/delete" class="form-actions">
         ${csrfField(ctx)}
-        <button type="submit" class="btn btn-danger" data-confirm="Delete this candidate permanently?">Yes, delete permanently</button>
+        <button type="submit" class="btn btn-danger">Yes, delete permanently</button>
         <a class="btn btn-secondary" href="${from ? `/app/applications/${from}` : '/app'}">Cancel</a>
       </form>
     </div>`,
@@ -512,16 +536,20 @@ async function searchPage(ctx) {
   const { db } = ctx.app;
   const q = (ctx.query.get('q') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const pageNo = /^[1-9]\d{0,3}$/.test(ctx.query.get('page') || '') ? Number(ctx.query.get('page')) : 1;
-  const base = `SELECT a.id, a.stage, a.applied_at, p.name, p.email, r.title AS role_title, r.site_name
-       FROM applications a JOIN people p ON p.id = a.person_id JOIN job_roles r ON r.id = a.role_id`;
-  const order = 'ORDER BY a.applied_at DESC, a.id DESC LIMIT ? OFFSET ?';
-  const paging = [PAGE_SIZE + 1, (pageNo - 1) * PAGE_SIZE];
-  const rows = q
-    ? await db.all(`${base} WHERE p.name LIKE ? ESCAPE '\\' OR p.email LIKE ? ESCAPE '\\' ${order}`, [likePattern(q), likePattern(q), ...paging])
-    : await db.all(`${base} ${order}`, paging);
-  const hasNext = rows.length > PAGE_SIZE;
-  const shown = rows.slice(0, PAGE_SIZE);
+  const from = 'FROM applications a JOIN people p ON p.id = a.person_id JOIN job_roles r ON r.id = a.role_id';
+  const where = q ? "WHERE p.name LIKE ? ESCAPE '\\' OR p.email LIKE ? ESCAPE '\\'" : '';
+  const filterArgs = q ? [likePattern(q), likePattern(q)] : [];
+  const total = (await db.get(`SELECT COUNT(*) AS n ${from} ${where}`, filterArgs)).n;
   const href = (n) => `/app/candidates?${new URLSearchParams({ ...(q ? { q } : {}), ...(n > 1 ? { page: String(n) } : {}) }).toString()}`.replace(/\?$/, '');
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // A page past the end (a stale link, or results that shrank) goes to the last real page.
+  if (pageNo > lastPage) return ctx.redirect(href(lastPage));
+  const shown = await db.all(
+    `SELECT a.id, a.stage, a.applied_at, p.name, p.email, r.title AS role_title, r.site_name ${from} ${where}
+      ORDER BY a.applied_at DESC, a.id DESC LIMIT ? OFFSET ?`,
+    [...filterArgs, PAGE_SIZE, (pageNo - 1) * PAGE_SIZE]
+  );
+  const hasNext = pageNo < lastPage;
   page(ctx, {
     title: 'Candidates',
     body: html`<div class="page-header"><div><h1>Candidates</h1>
@@ -538,7 +566,7 @@ async function searchPage(ctx) {
             <p>${q ? 'Check the spelling, or try part of the name or the email address.' : 'Applications appear here as soon as someone applies for an open role.'}</p>
             ${q ? html`<p><a class="btn btn-secondary" href="/app/candidates">Show recent applications</a></p>` : ''}
           </div>`
-        : html`<p class="result-count" id="result-count">${q ? `Results for "${q}"` : 'Most recent applications'}${pageNo > 1 ? `, page ${pageNo}` : ''}</p>
+        : html`<p class="result-count" id="result-count">${q ? `${total} ${total === 1 ? 'match' : 'matches'} for "${q}"` : `${total} ${total === 1 ? 'application' : 'applications'}, most recent first`}${lastPage > 1 ? `. Page ${pageNo} of ${lastPage}` : ''}</p>
           <div class="table-wrap"><table class="data" id="candidates-table">
             <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Stage</th><th>Applied</th></tr></thead>
             <tbody>

@@ -1,7 +1,7 @@
 'use strict';
 // Internal: dashboard, role pipeline, reassign rep, CSV export.
 const { html, raw } = require('../lib/render');
-const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, sourceLabel } = require('../lib/layout');
+const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, sourceLabel, errorSummary } = require('../lib/layout');
 const { requireUser } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
@@ -36,14 +36,16 @@ async function dashboard(ctx) {
     counts.get(row.role_id)[row.stage] = row.n;
   }
   // "+N since your last visit": applications that arrived after the stored stamp users.dashboard_seen_at, which only
-  // the explicit "Mark as seen" POST moves (a GET never writes). Until a user has marked something as seen there is
-  // no stamp, so nothing is shown.
+  // the explicit "Mark as seen" POST moves (a GET never writes). Until a user has marked something as seen, the
+  // moment their account was created is the baseline, so the counts work from the first visit.
   const since = new Map();
-  if (ctx.user.dashboard_seen_at) {
-    for (const row of await db.all('SELECT role_id, COUNT(*) AS n FROM applications WHERE applied_at > ? GROUP BY role_id', [ctx.user.dashboard_seen_at])) {
+  const baseline = ctx.user.dashboard_seen_at || ctx.user.created_at;
+  if (baseline) {
+    for (const row of await db.all('SELECT role_id, COUNT(*) AS n FROM applications WHERE applied_at > ? GROUP BY role_id', [baseline])) {
       since.set(row.role_id, row.n);
     }
   }
+  const anythingNew = roles.some((r) => (since.get(r.id) || 0) > 0);
   // Summary strip: totals over the roles on this page (so "My roles" shows my own numbers).
   const total = (stage) => roles.reduce((n, r) => n + ((counts.get(r.id) || {})[stage] || 0), 0);
   const monthStart = zonedMidnightUtc(`${todayIn(ctx.app.config.timezone).slice(0, 7)}-01`, ctx.app.config.timezone).toISOString();
@@ -64,7 +66,9 @@ async function dashboard(ctx) {
     body: html`<div class="page-header">
         <div><h1>Dashboard</h1></div>
         <div class="page-actions">
-          <form method="post" action="/app/seen" class="inline">${csrfField(ctx)}${showAll ? html`<input type="hidden" name="view" value="all">` : ''}<button type="submit" class="btn btn-secondary">Mark as seen</button></form>
+          ${anythingNew
+            ? html`<form method="post" action="/app/seen" class="inline">${csrfField(ctx)}${showAll ? html`<input type="hidden" name="view" value="all">` : ''}<button type="submit" class="btn btn-secondary">Mark as seen</button></form>`
+            : ''}
         </div>
       </div>
       <div class="summary-strip">
@@ -86,10 +90,10 @@ async function dashboard(ctx) {
               const fresh = since.get(r.id) || 0;
               return html`<li class="role-row role-row-app${r.status === 'closed' ? ' is-closed' : ''}" data-role-id="${r.id}">
                 <div class="role-row-main">
-                  <a class="role-title" href="/app/roles/${r.id}">${r.title}</a>
+                  <h2 class="role-heading"><a class="role-title" href="/app/roles/${r.id}">${r.title}</a></h2>
                   <span class="role-site">${r.site_name || r.vertical}</span>
                   <div class="role-row-meta">
-                    <span class="status status-${r.status}">${r.status === 'open' ? 'Open' : 'Closed'}</span>
+                    ${r.status === 'closed' ? html`<span class="status status-closed">Closed</span>` : ''}
                     <span>Rep: ${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</span>
                   </div>
                 </div>
@@ -113,6 +117,7 @@ async function dashboard(ctx) {
 // The only writer of users.dashboard_seen_at: "+N since your last visit" counts from this moment on.
 async function markSeen(ctx) {
   await ctx.app.db.run('UPDATE users SET dashboard_seen_at = ? WHERE id = ?', [nowIso(), ctx.user.id]);
+  setFlash(ctx, 'ok', 'Marked as seen. New applications will show as +N from now on.');
   ctx.redirect(ctx.form.get('view') === 'all' ? '/app?view=all' : '/app');
 }
 
@@ -184,6 +189,7 @@ async function rolePipeline(ctx) {
                     <form method="post" action="/app/applications/${a.id}/stage" class="cand-move">
                       ${csrfField(ctx)}
                       <input type="hidden" name="return_to" value="${returnTo}">
+                      <input type="hidden" name="from_stage" value="${a.stage}">
                       <select name="stage" aria-label="Move ${a.name} to stage" required>
                         <option value="">Move to…</option>
                         ${STAGES.filter((s) => s !== a.stage).map((s) => html`<option value="${s}">${STAGE_LABELS[s]}</option>`)}
@@ -215,17 +221,19 @@ async function reassign(ctx) {
   ctx.redirect(`/app/roles/${roleId}`);
 }
 
-function exportPage(ctx) {
+function exportPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
   page(ctx, {
     title: 'Export',
+    status,
     body: html`<div class="page-header"><div><h1>Export applications</h1>
         <p class="lede">Download every application as a spreadsheet-ready CSV file.</p></div></div>
+      ${errorSummary(Object.keys(errors).map((k) => ({ id: `f-${k}`, text: errors[k] })))}
       <form method="get" action="/app/export.csv" class="card centred-card">
         <h2>Choose a date range</h2>
         <p class="fine-print">One row per application, in UTF-8. Dates are in ${ctx.app.config.timezone}. Leave both dates empty to export everything.</p>
         <div class="field-row">
-          <div class="field"><label for="f-from">Applied from</label><input type="date" name="from" id="f-from"></div>
-          <div class="field"><label for="f-to">Applied to</label><input type="date" name="to" id="f-to"></div>
+          <div class="field${errors.from ? ' has-error' : ''}"><label for="f-from">Applied from</label><input type="date" name="from" id="f-from" value="${values.from || ''}"${errors.from ? raw(' aria-invalid="true" aria-describedby="err-from"') : ''}>${errors.from ? html`<p class="error" id="err-from">${errors.from}</p>` : ''}</div>
+          <div class="field${errors.to ? ' has-error' : ''}"><label for="f-to">Applied to</label><input type="date" name="to" id="f-to" value="${values.to || ''}"${errors.to ? raw(' aria-invalid="true" aria-describedby="err-to"') : ''}>${errors.to ? html`<p class="error" id="err-to">${errors.to}</p>` : ''}</div>
         </div>
         <div class="form-actions"><button type="submit" class="btn btn-primary">Download CSV</button></div>
       </form>`,
@@ -242,7 +250,11 @@ async function exportCsv(ctx) {
   const tz = config.timezone;
   const from = ctx.query.get('from') || '';
   const to = ctx.query.get('to') || '';
-  if ((from && !isValidYmd(from)) || (to && !isValidYmd(to))) throw new HttpError(400, 'Dates must be YYYY-MM-DD.');
+  const errors = {};
+  if (from && !isValidYmd(from)) errors.from = 'Applied from must be a valid date.';
+  if (to && !isValidYmd(to)) errors.to = 'Applied to must be a valid date.';
+  if (!errors.from && !errors.to && from && to && from > to) errors.to = 'Applied to must be on or after Applied from.';
+  if (Object.keys(errors).length) return exportPage(ctx, { errors, values: { from, to }, status: 400 });
   const where = [];
   const args = [];
   if (from) {
@@ -279,12 +291,14 @@ async function exportCsv(ctx) {
     a.heard_from,
     a.stage,
     formatDateTime(a.stage_changed_at, tz),
-    formatDateTime(a.onboarded_at, tz),
+    // onboarded_at is kept when a candidate leaves Onboarded (so coming back is a clean record) but is only exported while onboarded.
+    a.stage === 'onboarded' ? formatDateTime(a.onboarded_at, tz) : '',
     a.voltax_user_id || '',
     a.linkedin_url,
   ]);
   const filename = `fansided-applications-${todayIn(tz)}.csv`;
-  ctx.send(200, toCsv(CSV_COLUMNS, data), {
+  // A UTF-8 byte order mark makes Excel read accented names correctly.
+  ctx.send(200, `\ufeff${toCsv(CSV_COLUMNS, data)}`, {
     'Content-Type': 'text/csv; charset=utf-8',
     'Content-Disposition': `attachment; filename="${filename}"`,
   });

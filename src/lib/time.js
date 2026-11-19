@@ -38,6 +38,18 @@ function formatDateFriendly(iso, timeZone) {
   return new Intl.DateTimeFormat('en-US', { timeZone, month: 'short', day: 'numeric', year: 'numeric' }).format(d);
 }
 
+// "Nov 18, 2026, 7:32 PM ET": the one format every timestamp shown to a user uses (CSV keeps formatDateTime).
+function formatDateTimeFriendly(iso, timeZone) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const base = { timeZone, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' };
+  let text = new Intl.DateTimeFormat('en-US', { ...base, timeZoneName: 'shortGeneric' }).format(d);
+  // Zones with no short generic name ("United Kingdom Time") fall back to the abbreviation (GMT, BST).
+  if (/Time$/.test(text)) text = new Intl.DateTimeFormat('en-US', { ...base, timeZoneName: 'short' }).format(d);
+  return text.replace(/[\u202f\u00a0]/g, ' ');
+}
+
 function todayIn(timeZone, now = new Date()) {
   const p = parts(now, timeZone);
   return `${p.year}-${p.month}-${p.day}`;
@@ -74,4 +86,4 @@ function daysSince(iso, now = new Date()) {
   return Math.max(0, Math.floor((now.getTime() - t) / 86400000));
 }
 
-module.exports = { formatDateTime, formatDate, formatDateFriendly, todayIn, zonedMidnightUtc, isValidYmd, daysSince };
+module.exports = { formatDateTime, formatDate, formatDateFriendly, formatDateTimeFriendly, todayIn, zonedMidnightUtc, isValidYmd, daysSince };

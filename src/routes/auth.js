@@ -1,7 +1,7 @@
 'use strict';
 // Password sign-in, sign-out, first-admin setup, set-password (invite / reset links) and the account page.
 const { html } = require('../lib/render');
-const { page, setFlash, errorPage } = require('../lib/layout');
+const { page, setFlash, errorSummary } = require('../lib/layout');
 const { HttpError, readForm } = require('../lib/http');
 const { newSession, setSessionCookie, destroySession, requireUser, safeNext, normaliseEmail } = require('../lib/auth');
 const { publicField, verifyPublic, internalForm } = require('../lib/csrf');
@@ -178,7 +178,7 @@ async function setupSubmit(ctx) {
   verifyPublic(ctx, form);
   await tokenPostBudget(ctx); // only a request that passed the CSRF check uses up the budget
   const token = form.get('token');
-  if (!(await setupAvailable(ctx, token))) throw new HttpError(404, 'Page not found.');
+  if (!(await setupAvailable(ctx, token))) return invalidLink(ctx);
   const error = checkNewPassword(form);
   if (error) return setupPage(ctx, token, { error, status: 400 });
 
@@ -204,15 +204,24 @@ async function setupSubmit(ctx) {
       args: [config.adminEmail, hash],
     }),
   ]);
-  if (results[0].changes !== 1) throw new HttpError(404, 'Page not found.');
+  if (results[0].changes !== 1) return invalidLink(ctx);
   setFlash(ctx, 'ok', 'Your password is set. Sign in below.');
   ctx.redirect('/login');
 }
 
 // ---------- Set password (invite / reset link) ----------
 
+// One page, one body, for every way a link can fail (unknown, used, expired, user deactivated, setup closed), so the
+// page never says which. The status stays 404.
 function invalidLink(ctx) {
-  errorPage(ctx, 404, 'This link is no longer valid. Ask an admin for a new one.');
+  page(ctx, {
+    title: 'This link is no longer valid',
+    status: 404,
+    auth: true,
+    body: html`<h1>This link is no longer valid</h1>
+      <p>Ask an admin to send you a new link.</p>
+      <div class="form-actions"><a class="btn btn-primary btn-block" href="/login">Go to sign in</a></div>`,
+  });
 }
 
 // A token row is usable when it exists, is unused, unexpired and its user is active.
@@ -290,7 +299,8 @@ async function setPasswordSubmit(ctx) {
 
 // ---------- Account (change own password) ----------
 
-function accountPage(ctx, { error, status = 200 } = {}) {
+// `errorField` is the id of the field the message is about, so the summary can link to it.
+function accountPage(ctx, { error, status = 200, errorField = 'f-password' } = {}) {
   page(ctx, {
     title: 'Account',
     status,
@@ -306,7 +316,7 @@ function accountPage(ctx, { error, status = 200 } = {}) {
       <section class="card wrap-narrow" aria-labelledby="change-password">
         <h2 id="change-password">Change password</h2>
         <p class="muted">Changing your password signs you out of other devices.</p>
-        ${errorBox(error)}
+        ${error ? errorSummary([{ id: errorField, text: error }]) : ''}
         <form method="post" action="/app/account">
           ${csrfField(ctx)}
           <div class="field">
@@ -323,7 +333,7 @@ function accountPage(ctx, { error, status = 200 } = {}) {
 async function accountSubmit(ctx) {
   const { db, config } = ctx.app;
   const error = checkNewPassword(ctx.form);
-  if (error) return accountPage(ctx, { error, status: 400 });
+  if (error) return accountPage(ctx, { error, status: 400, errorField: /match/.test(error) ? 'f-password-confirm' : 'f-password' });
   const current = ctx.form.get('current_password');
 
   // Guessing the current password from a stolen session counts against the same email limits as login.
@@ -332,7 +342,7 @@ async function accountSubmit(ctx) {
   const row = await db.get('SELECT password_hash FROM users WHERE id = ? AND active = 1', [ctx.user.id]);
   const oldHash = row && row.password_hash;
   const matches = await verifyPassword(current.length <= MAX_LENGTH ? current : '', oldHash || (await dummyHash()));
-  if (!oldHash || !matches) return accountPage(ctx, { error: 'The current password is not correct.', status: 400 });
+  if (!oldHash || !matches) return accountPage(ctx, { error: 'The current password is not correct.', status: 400, errorField: 'f-current_password' });
 
   const hash = await hashPassword(ctx.form.get('password'));
   const session = newSession(ctx.user.id, {
@@ -364,7 +374,7 @@ function register(router) {
 
   router.get('/setup', async (ctx) => {
     const token = ctx.query.get('token') || '';
-    if (!(await guessGuard(ctx, () => setupAvailable(ctx, token)))) throw new HttpError(404, 'Page not found.');
+    if (!(await guessGuard(ctx, () => setupAvailable(ctx, token)))) return invalidLink(ctx);
     setupPage(ctx, token);
   });
   router.post('/setup', setupSubmit);

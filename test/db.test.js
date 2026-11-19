@@ -456,7 +456,7 @@ for (const driver of DRIVERS) {
         await c.get(`/app/applications/${app.id}`);
         const eventsBefore = await t.db.all('SELECT * FROM application_events WHERE application_id = ?', [app.id]);
         raceBeforeNextBatch(t.db, () => t.db.run("UPDATE applications SET stage = 'trial' WHERE id = ?", [app.id]));
-        const res = await c.post(`/app/applications/${app.id}/stage`, { stage: 'reviewing' });
+        const res = await c.post(`/app/applications/${app.id}/stage`, { stage: 'reviewing', from_stage: 'new' });
         assert.equal(res.status, 303);
         assert.equal((await lastApplication(t.db)).stage, 'trial'); // the other writer's value stands
         assert.deepEqual(await t.db.all('SELECT * FROM application_events WHERE application_id = ?', [app.id]), eventsBefore); // no event row for the lost move
@@ -466,12 +466,12 @@ for (const driver of DRIVERS) {
         const third = await makeRole(t.db, { title: 'Third', assigned: rep });
         await c.get(`/app/applications/${app.id}`);
         raceBeforeNextBatch(t.db, () => t.db.run('UPDATE applications SET role_id = ? WHERE id = ?', [third, app.id]));
-        await c.post(`/app/applications/${app.id}/role`, { role_id: String(other) });
+        await c.post(`/app/applications/${app.id}/role`, { role_id: String(other), from_role_id: String(role) });
         assert.equal((await lastApplication(t.db)).role_id, third);
         assert.equal(await count(t.db, 'application_events', "type = 'role_change'"), 0);
         // And with the onboarded + Voltax path: neither event is written.
         raceBeforeNextBatch(t.db, () => t.db.run("UPDATE applications SET stage = 'passed' WHERE id = ?", [app.id]));
-        await c.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', voltax_user_id: 'vx-9' });
+        await c.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'trial', voltax_user_id: 'vx-9' });
         assert.equal(await count(t.db, 'application_events', "type = 'voltax_recorded'"), 0);
         assert.equal((await lastApplication(t.db)).voltax_user_id, null);
         assert.equal((await lastApplication(t.db)).stage, 'passed');
@@ -490,7 +490,7 @@ for (const driver of DRIVERS) {
         const c = t.client();
         await c.login('rep@fansided.com');
         await c.get(`/app/applications/${app.id}`);
-        await c.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', voltax_user_id: 'vx-1', voltax_onboarded_on: '2026-03-01' });
+        await c.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'new', voltax_user_id: 'vx-1', voltax_onboarded_on: '2026-03-01' });
         const row = await lastApplication(t.db);
         assert.equal(row.stage, 'onboarded');
         assert.equal(row.voltax_user_id, 'vx-1');

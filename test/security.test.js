@@ -53,7 +53,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
     hook.requests.length = 0;
     const res = await t.client().apply(role, { name: 'Secret Applicant', email: 'secret.applicant@example.com', answer_0: 'sensitive answer', linkedin_url: 'https://linkedin.com/in/secret' });
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/thanks#top');
+    assert.equal(res.headers.get('location'), '/thanks');
     const app = await lastApplication(t.db);
     assert.equal(hook.requests.length, 1);
     const [req] = hook.requests;
@@ -79,7 +79,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
     logs.length = 0;
     const res = await t.client().apply(role, { name: 'Err Case', email: 'err.case@example.com' });
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/thanks#top');
+    assert.equal(res.headers.get('location'), '/thanks');
     const app = await lastApplication(t.db);
     assert.equal(app.stage, 'new');
     assert.equal(hook.requests.length, 1);
@@ -107,7 +107,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
     const res = await t.client().apply(role, { name: 'Hang Case', email: 'hang.case@example.com' });
     const took = Date.now() - started;
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/thanks#top');
+    assert.equal(res.headers.get('location'), '/thanks');
     assert.equal(await count(t.db, 'applications'), before + 1);
     assert.equal(hook.requests.length, 1);
     assert.ok(took >= TIMEOUT_MS - 200 && took < TIMEOUT_MS + 3000, `took ${took} ms (timeout ${TIMEOUT_MS})`);
@@ -142,7 +142,10 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       const row = (text, id) => new RegExp(`data-role-id="${id}">[\\s\\S]*?<div class="role-row-action">`).exec(text)[0];
       const newCell = (text, id) => /<li class="stage-seg stage-new[^"]*" data-stage="new">[\s\S]*$/.exec(row(text, id))[0];
       const stamp = async () => (await t.db.get("SELECT dashboard_seen_at FROM users WHERE email = 'rep@fansided.com'")).dashboard_seen_at;
-      await t.client().apply(roleA, { email: 'before1@example.com' }); // arrived before the first visit
+      await t.client().apply(roleA, { email: 'before1@example.com' }); // arrived before the account existed
+      await new Promise((r) => setTimeout(r, 15));
+      // The account-creation time is the baseline until the first "Mark as seen" (U3), so move it after that application.
+      await t.db.run("UPDATE users SET created_at = ? WHERE email = 'rep@fansided.com'", [new Date().toISOString()]);
 
       let c = t.client();
       await c.login('rep@fansided.com');
@@ -152,7 +155,7 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       assert.doesNotMatch(first.text, /since your last visit/);
       assert.doesNotMatch(newCell(first.text, quiet), /is-hot/); // zero New is not highlighted
       assert.equal(await stamp(), null, 'GET /app must not write the stamp');
-      assert.match(first.text, /<form method="post" action="\/app\/seen"[^>]*>[\s\S]*?name="csrf"[\s\S]*?Mark as seen/);
+      assert.doesNotMatch(first.text, /Mark as seen/, 'nothing new: no button');
 
       // Without the CSRF token nothing happens.
       assert.equal((await c.post('/app/seen', {}, { csrf: 'nope' })).status, 403);
@@ -173,6 +176,7 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       assert.match(newCell(seen.text, roleA), /is-hot/);
       assert.match(newCell(seen.text, roleB), /\+1 since your last visit/);
       assert.doesNotMatch(row(seen.text, quiet), /since your last visit/);
+      assert.match(seen.text, /<form method="post" action="\/app\/seen"[^>]*>[\s\S]*?name="csrf"[\s\S]*?Mark as seen/);
       // F-09: reloading (GET) does not clear it any more.
       const before = await stamp();
       const reload = await c.get('/app');
@@ -187,7 +191,9 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       const csrf = c.csrf(reload.text);
       const all = await c.post('/app/seen', { view: 'all' }, { csrf });
       assert.equal(all.headers.get('location'), '/app?view=all');
+      assert.match((await c.follow(all)).text, /Marked as seen\. New applications will show as \+N from now on\./);
       const cleared = await c.get('/app');
+      assert.doesNotMatch(cleared.text, /Mark as seen/);
       assert.doesNotMatch(cleared.text, /since your last visit/);
       assert.match(newCell(cleared.text, roleA), /stage-seg-n">3</);
 

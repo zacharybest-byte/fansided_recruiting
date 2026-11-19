@@ -60,13 +60,17 @@ describe(`[${driver}] QA fixes`, () => {
     assert.equal(withSource.headers.get('location'), `/roles/${role}?source=x-1`);
   });
 
-  test('#3 the form posts to #apply and errors render a focusable summary', async () => {
+  test('#3 the form posts to a fragment-free URL and errors render a focusable summary at the top of the page', async () => {
     const c = t.client();
     const page = await c.get(`/roles/${role}`);
-    assert.match(page.text, new RegExp(`action="/roles/${role}/apply#apply"`));
+    assert.match(page.text, new RegExp(`action="/roles/${role}/apply" `));
+    assert.doesNotMatch(page.text, /id="error-summary"/);
     const res = await c.apply(role, { name: '', answer_0: 'a' });
     assert.equal(res.status, 400);
-    assert.match(res.text, /<h2 id="apply">Apply for this role<\/h2>\s*<div class="error-summary" id="error-summary" tabindex="-1" role="alert">/);
+    assert.match(res.text, /<main id="main" tabindex="-1"><div class="error-summary" id="error-summary" tabindex="-1" role="alert">/);
+    // The only h2 in the summary comes before the form section's own h2.
+    assert.ok(res.text.indexOf('id="error-summary"') < res.text.indexOf('<h2 id="apply">'));
+    assert.match(res.text, /<a href="#f-name">Full name is required\.<\/a>/);
   });
 
   test('#4 only stored applications (and honeypot hits) count towards the rate limit', async () => {
@@ -86,7 +90,7 @@ describe(`[${driver}] QA fixes`, () => {
     await admin.get(`/app/applications/${app.id}`);
     await admin.post(`/app/applications/${app.id}/notes`, { body: 'Written under QA Role' });
     await admin.post(`/app/applications/${app.id}/email`, { via: 'gmail', subject: 'Sent under QA Role', body: 'x' });
-    await admin.post(`/app/applications/${app.id}/role`, { role_id: String(other) });
+    await admin.post(`/app/applications/${app.id}/role`, { role_id: String(other), from_role_id: String(role) });
     const page = await admin.get(`/app/applications/${app.id}`);
     const notes = page.text.split('id="notes"')[1].split('</section>')[0];
     assert.match(notes, /<span class="tag">QA Role<\/span>/);
@@ -130,8 +134,10 @@ describe(`[${driver}] QA fixes`, () => {
     await rc.login('rep@fansided.com');
     await rc.get('/app');
     assert.equal((await rc.post(`/app/admin/users/${me.id}/name`, { name: 'Hacked' })).status, 403);
-    // Deactivate asks for confirmation in the browser.
-    assert.match((await admin.get('/app/admin/users')).text, /data-confirm="Deactivate Rita Rep\?/);
+    // Deactivate goes through a server-rendered confirmation page (works without JavaScript).
+    const users = (await admin.get('/app/admin/users')).text;
+    assert.doesNotMatch(users, /data-confirm/);
+    assert.match(users, /href="\/app\/admin\/users\/\d+\/deactivate">Deactivate<span class="visually-hidden"> Rita Rep<\/span>/);
   });
 
   test('#10 a changed questionnaire is detected and the applicant is asked to review', async () => {
@@ -157,7 +163,7 @@ describe(`[${driver}] QA fixes`, () => {
     await t.client().apply(role, { email: 'pipe-onboard@example.com', answer_0: 'a' });
     const app = await lastApplication(t.db);
     await admin.get(`/app/roles/${role}`);
-    const res = await admin.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', return_to: `/app/roles/${role}` });
+    const res = await admin.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'new', return_to: `/app/roles/${role}` });
     assert.equal(res.headers.get('location'), `/app/applications/${app.id}#voltax`);
     const page = await admin.follow(res);
     assert.match(page.text, /<h3 id="voltax">Voltax<\/h3>/);
@@ -165,7 +171,7 @@ describe(`[${driver}] QA fixes`, () => {
     await t.client().apply(role, { email: 'pipe-review@example.com', answer_0: 'a' });
     const app2 = await lastApplication(t.db);
     await admin.get(`/app/roles/${role}`);
-    const res2 = await admin.post(`/app/applications/${app2.id}/stage`, { stage: 'reviewing', return_to: `/app/roles/${role}` });
+    const res2 = await admin.post(`/app/applications/${app2.id}/stage`, { stage: 'reviewing', from_stage: 'new', return_to: `/app/roles/${role}` });
     assert.equal(res2.headers.get('location'), `/app/roles/${role}`);
   });
 });

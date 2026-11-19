@@ -2,7 +2,7 @@
 // Page shell, flash messages and small shared view helpers.
 const { html } = require('./render');
 const { hmacHex, safeEqual } = require('./crypto');
-const { formatDateTime, formatDateFriendly } = require('./time');
+const { formatDateFriendly, formatDateTimeFriendly } = require('./time');
 
 const STAGES = ['new', 'reviewing', 'trial', 'onboarded', 'passed'];
 const STAGE_LABELS = { new: 'New', reviewing: 'Reviewing', trial: 'Trial', onboarded: 'Onboarded', passed: 'Passed' };
@@ -49,18 +49,24 @@ function navLink(active, href, label) {
   return html`<a href="${href}"${active === href ? html` aria-current="page"` : ''}>${label}</a>`;
 }
 
+const NAV_LABELS = {
+  '/app': 'Dashboard',
+  '/app/candidates': 'Candidates',
+  '/app/export': 'Export',
+  '/app/admin/roles': 'Roles',
+  '/app/admin/templates': 'Templates',
+  '/app/admin/users': 'Users',
+  '/app/admin/sample': 'Sample data',
+};
+
 const wordmark = (href, tag, extra = '') => html`<a href="${href}" class="wordmark${extra}">FanSided${tag ? html`<span class="wordmark-tag">${tag}</span>` : ''}</a>`;
 
-function internalMasthead(ctx, user) {
-  const active = navActive(ctx.path);
-  return html`<header class="masthead masthead-app">
-  <div class="masthead-inner">
-    ${wordmark('/app', 'Recruit')}
-    <nav class="nav" aria-label="Main">
-      ${navLink(active, '/app', 'Dashboard')}
+// The links, in one place, for both the desktop bar and the small-screen menu.
+function navLinks(active, isAdmin) {
+  return html`${navLink(active, '/app', 'Dashboard')}
       ${navLink(active, '/app/candidates', 'Candidates')}
       ${navLink(active, '/app/export', 'Export')}
-      ${user.role === 'admin'
+      ${isAdmin
         ? html`<div class="nav-group" role="group" aria-label="Manage">
             <span class="nav-label">Manage</span>
             ${navLink(active, '/app/admin/roles', 'Roles')}
@@ -68,10 +74,30 @@ function internalMasthead(ctx, user) {
             ${navLink(active, '/app/admin/users', 'Users')}
             ${navLink(active, '/app/admin/sample', 'Sample data')}
           </div>`
-        : ''}
+        : ''}`;
+}
+
+function internalMasthead(ctx, user) {
+  const active = navActive(ctx.path);
+  const isAdmin = user.role === 'admin';
+  const onAccount = active === '' && ctx.path.startsWith('/app/account');
+  const current = NAV_LABELS[active] || (onAccount ? 'Account' : '');
+  // Two renderings of the same links, no JavaScript: the bar (wide screens) and a <details> menu (small screens).
+  // CSS shows exactly one of them, so a screen reader only ever meets one "Main" navigation.
+  return html`<header class="masthead masthead-app">
+  <div class="masthead-inner">
+    ${wordmark('/app', 'Recruit')}
+    <nav class="nav nav-bar" aria-label="Main">
+      ${navLinks(active, isAdmin)}
     </nav>
+    <details class="nav-menu">
+      <summary><span class="nav-menu-label">Menu</span>${current ? html`<span class="nav-menu-current">${current}</span>` : ''}</summary>
+      <nav class="nav-menu-list" aria-label="Main menu">
+        ${navLinks(active, isAdmin)}
+      </nav>
+    </details>
     <div class="masthead-user">
-      <a href="/app/account" class="user-name"${active === '' && ctx.path.startsWith('/app/account') ? html` aria-current="page"` : ''}>${user.name || user.email}</a>
+      <a href="/app/account" class="user-name"${onAccount ? html` aria-current="page"` : ''}>${user.name || user.email}</a>
       <form method="post" action="/logout">
         <input type="hidden" name="csrf" value="${ctx.session.csrfToken}">
         <button type="submit" class="link">Sign out</button>
@@ -98,8 +124,8 @@ function page(ctx, { title, body, status = 200, auth = false }) {
   const year = new Date().getFullYear();
 
   const main = auth
-    ? html`<main id="main" class="auth-main"><div class="auth-wrap">${wordmark('/', 'Recruit', ' auth-wordmark')}<div class="auth-card">${flashHtml}${body}</div></div></main>`
-    : html`<main id="main">${flashHtml}${body}</main>`;
+    ? html`<main id="main" class="auth-main" tabindex="-1"><div class="auth-wrap">${wordmark('/', 'Recruit', ' auth-wordmark')}<div class="auth-card">${flashHtml}${body}</div></div></main>`
+    : html`<main id="main" tabindex="-1">${flashHtml}${body}</main>`;
   const footer = internal
     ? ''
     : html`<footer class="footer"><div class="footer-inner"><span>FanSided Recruit, ${year}</span>${auth ? '' : html`<a href="/">See open roles</a>`}</div></footer>`;
@@ -141,14 +167,30 @@ function errorPage(ctx, status, message) {
   });
 }
 
-const fmtDateTime = (ctx, iso) => formatDateTime(iso, ctx.app.config.timezone);
+const fmtDateTime = (ctx, iso) => formatDateTimeFriendly(iso, ctx.app.config.timezone);
 const fmtDate = (ctx, iso) => formatDateFriendly(iso, ctx.app.config.timezone);
 
-// Source tags are free text from ?source=; the common ones read as labels, anything else is shown as typed.
+// Source tags are free text from ?source=; the common ones read as labels, and a tag that starts with one
+// ("linkedin-nfl") keeps what was typed in brackets. Anything else is shown as typed.
 const SOURCE_LABELS = { linkedin: 'LinkedIn', indeed: 'Indeed', x: 'X', twitter: 'X', 'x/twitter': 'X', referral: 'Referral', site: 'FanSided site', 'fansided site': 'FanSided site', other: 'Other' };
+const SOURCE_PREFIXES = /^(linkedin|indeed|twitter|x|referral|site)[-_:.]/i;
 const sourceLabel = (tag) => {
   const t = String(tag || '').trim();
-  return SOURCE_LABELS[t.toLowerCase()] || t;
+  const exact = SOURCE_LABELS[t.toLowerCase()];
+  if (exact) return exact;
+  const m = SOURCE_PREFIXES.exec(t);
+  return m ? `${SOURCE_LABELS[m[1].toLowerCase()]} (${t})` : t;
 };
 
-module.exports = { page, errorPage, setFlash, STAGES, STAGE_LABELS, HEARD_FROM, fmtDateTime, fmtDate, sourceLabel };
+// "There is a problem" summary shared by every form. `items` are { id, text } where id is the field's element id.
+// It gets focus on load (public/app.js); without JavaScript the page it sits at the top of is where the browser lands.
+function errorSummary(items, { intro = '' } = {}) {
+  if (!items.length && !intro) return '';
+  return html`<div class="error-summary" id="error-summary" tabindex="-1" role="alert">
+    <h2>There is a problem</h2>
+    ${intro ? html`<p>${intro}</p>` : ''}
+    ${items.length ? html`<ul>${items.map((i) => html`<li><a href="#${i.id}">${i.text}</a></li>`)}</ul>` : ''}
+  </div>`;
+}
+
+module.exports = { page, errorPage, setFlash, STAGES, STAGE_LABELS, HEARD_FROM, fmtDateTime, fmtDate, sourceLabel, errorSummary };

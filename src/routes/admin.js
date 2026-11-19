@@ -1,7 +1,7 @@
 'use strict';
 // Admin-only screens: email templates, roles, users.
 const { html, raw } = require('../lib/render');
-const { page, setFlash, fmtDate } = require('../lib/layout');
+const { page, setFlash, fmtDate, errorSummary } = require('../lib/layout');
 const { requireAdmin, normaliseEmail } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
@@ -30,6 +30,11 @@ function field(errors, name, label, { help = '', required = false, id = `f-${nam
   </div>`;
 }
 
+// Error summary for a form that has per-field errors. `ids` maps a field name to the element id when it is not f-<name>.
+function summaryFor(errors, ids = {}) {
+  return errorSummary(Object.keys(errors).map((k) => ({ id: ids[k] || `f-${k}`, text: errors[k] })));
+}
+
 // ---------- Templates ----------
 
 async function templatesPage(ctx) {
@@ -47,8 +52,7 @@ async function templatesPage(ctx) {
         ${templates.map(
           (t) => html`<tr><td><a href="/app/admin/templates/${t.id}"><strong>${t.name}</strong></a></td><td>${t.subject}</td><td>${fmtDate(ctx, t.updated_at)}</td>
             <td><div class="row-actions"><a href="/app/admin/templates/${t.id}">Edit</a>
-              <form method="post" action="/app/admin/templates/${t.id}/delete" class="inline">${csrfField(ctx)}
-              <button type="submit" class="link danger" data-confirm="Delete this template?">Delete<span class="visually-hidden"> ${t.name}</span></button></form></div></td></tr>`
+              <a class="danger-link" href="/app/admin/templates/${t.id}/delete">Delete<span class="visually-hidden"> ${t.name}</span></a></div></td></tr>`
         )}
       </tbody></table></div>`}`,
   });
@@ -68,6 +72,7 @@ function templateForm(ctx, t, { errors = {}, status = 200 } = {}) {
     status,
     body: html`<a class="back" href="/app/admin/templates">Email templates</a>
       <div class="page-header"><div><h1>${isNew ? 'New template' : `Edit ${t.name}`}</h1></div></div>
+      ${summaryFor(errors)}
       <div class="grid-2 wide-left">
       <form method="post" action="${isNew ? '/app/admin/templates' : `/app/admin/templates/${t.id}`}" class="card">
         ${csrfField(ctx)}
@@ -138,8 +143,9 @@ async function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
     body: html`<a class="back" href="/app/admin/roles">Roles</a>
       <div class="page-header">
         <div><h1>${isNew ? 'New role' : `Edit ${r.title}`}</h1></div>
-        ${isNew ? '' : html`<div class="page-actions"><a class="btn btn-secondary" href="/app/roles/${r.id}">Open pipeline</a></div>`}
+        ${isNew ? '' : html`<div class="page-actions">${r.status === 'open' ? html`<a class="btn btn-secondary" href="/roles/${r.id}">View public page</a>` : ''}<a class="btn btn-secondary" href="/app/roles/${r.id}">Open pipeline</a></div>`}
       </div>
+      ${summaryFor(errors, { questions: 'f-q0' })}
       <form method="post" action="${isNew ? '/app/admin/roles' : `/app/admin/roles/${r.id}`}" class="stack-form">
         ${csrfField(ctx)}
         <fieldset class="form-section">
@@ -244,8 +250,9 @@ async function usersPage(ctx, { errors = {}, values = {}, status = 200, link = n
     status,
     body: html`<div class="page-header">
         <div><h1>Users</h1><p class="lede">Everyone who can sign in to Recruit. Admins manage roles, templates and users; reps work the pipelines.</p></div>
-        <div class="page-actions"><a href="#add-user" class="btn btn-primary">Add a user</a></div>
+        <div class="page-actions"><a href="#add-user" class="btn btn-quiet">Add a user</a></div>
       </div>
+      ${summaryFor(errors)}
       ${link
         ? html`<section class="card link-box" id="new-link">
             <h2>${link.kind === 'invite' ? 'Invite link' : 'Password reset link'} for ${linkEmail}</h2>
@@ -269,8 +276,8 @@ async function usersPage(ctx, { errors = {}, values = {}, status = 200, link = n
             <td class="status-cell">${statusOf(u)}</td>
             <td class="num">${u.role_count}</td>
             <td><div class="row-actions">${u.active
-              ? html`<form method="post" action="/app/admin/users/${u.id}/reset-link" class="inline">${csrfField(ctx)}<button type="submit" class="link">${u.has_password ? 'Create reset link' : 'New invite link'}</button></form>
-                 <form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link danger" data-confirm="Deactivate ${u.name || u.email}? They will be signed out and can no longer sign in.">Deactivate</button></form>`
+              ? html`<form method="post" action="/app/admin/users/${u.id}/reset-link" class="inline">${csrfField(ctx)}<button type="submit" class="link">${u.has_password ? 'Create reset link' : 'Create invite link'}</button></form>
+                 <a class="danger-link" href="/app/admin/users/${u.id}/deactivate">Deactivate<span class="visually-hidden"> ${u.name || u.email}</span></a>`
               : html`<form method="post" action="/app/admin/users/${u.id}/reactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link">Reactivate</button></form>`}</div></td>
           </tr>`
         )}
@@ -330,11 +337,74 @@ async function samplePage(ctx) {
         <div class="form-actions">
           <form method="post" action="/app/admin/sample/load" class="inline">${csrfField(ctx)}
             <button type="submit" class="btn btn-primary"${c.loaded ? raw(' disabled') : ''}>Load sample data</button></form>
-          <form method="post" action="/app/admin/sample/remove" class="inline">${csrfField(ctx)}
-            <button type="submit" class="btn btn-danger" data-confirm="Remove all sample roles, candidates and applications?"${c.loaded ? '' : raw(' disabled')}>Remove sample data</button></form>
+          ${c.loaded
+            ? html`<a class="btn btn-danger" href="/app/admin/sample/remove">Remove sample data</a>`
+            : html`<button type="button" class="btn btn-danger" disabled>Remove sample data</button>`}
         </div>
         <p class="muted small">Removing deletes the sample candidates and everything attached to them. A sample role that has received a real application is closed and kept.</p>
       </div>`,
+  });
+}
+
+// Confirmation pages for destructive actions: plain GET pages (they change nothing) whose button POSTs with the
+// CSRF token, so the confirmation works without JavaScript.
+async function sampleRemoveConfirm(ctx) {
+  const c = await sampleCounts(ctx.app.db);
+  if (!c.loaded) {
+    setFlash(ctx, 'ok', 'No sample data is loaded.');
+    return ctx.redirect('/app/admin/sample');
+  }
+  page(ctx, {
+    title: 'Remove sample data',
+    body: html`<div class="card card-danger centred-card">
+      <h1>Remove the sample data?</h1>
+      <p>This deletes the ${c.roles} sample roles, ${c.people} sample candidates and ${c.applications} applications, with their notes and activity. Your real roles and candidates are not touched.</p>
+      <p><strong>This cannot be undone.</strong> A sample role that has received a real application is closed and kept.</p>
+      <form method="post" action="/app/admin/sample/remove" class="form-actions">
+        ${csrfField(ctx)}
+        <button type="submit" class="btn btn-danger">Yes, remove sample data</button>
+        <a class="btn btn-secondary" href="/app/admin/sample">Cancel</a>
+      </form>
+    </div>`,
+  });
+}
+
+async function templateDeleteConfirm(ctx) {
+  const t = await getTemplate(ctx.app.db, ctx.params.id);
+  page(ctx, {
+    title: 'Delete template',
+    body: html`<div class="card card-danger centred-card">
+      <h1>Delete the template "${t.name}"?</h1>
+      <p>Reps will no longer be able to load it into the email composer. Emails already logged keep their text.</p>
+      <p><strong>This cannot be undone.</strong></p>
+      <form method="post" action="/app/admin/templates/${t.id}/delete" class="form-actions">
+        ${csrfField(ctx)}
+        <button type="submit" class="btn btn-danger">Yes, delete template</button>
+        <a class="btn btn-secondary" href="/app/admin/templates">Cancel</a>
+      </form>
+    </div>`,
+  });
+}
+
+// Shared by the confirm page (GET) and the POST that finds a user still assigned to roles.
+async function deactivatePage(ctx, u, roles) {
+  const who = u.name || u.email;
+  page(ctx, {
+    title: 'Deactivate user',
+    body: html`<div class="card card-danger centred-card">
+      <h1>Deactivate ${who}?</h1>
+      <p>${who} will be signed out and can no longer sign in. You can reactivate them later.</p>
+      ${roles.length
+        ? html`<p class="flash flash-error">Warning: ${who} is still the assigned rep for ${roles.length} role${roles.length === 1 ? '' : 's'}.</p>
+          <ul>${roles.map((r) => html`<li><a href="/app/roles/${r.id}">${r.title}</a>${r.status === 'closed' ? ' (closed)' : ''}</li>`)}</ul>
+          <p>Reassign ${roles.length === 1 ? 'this role' : 'these roles'} after deactivating.</p>`
+        : ''}
+      <form method="post" action="/app/admin/users/${u.id}/deactivate" class="form-actions">
+        ${csrfField(ctx)}<input type="hidden" name="confirm" value="1">
+        <button type="submit" class="btn btn-danger">${roles.length ? 'Deactivate anyway' : 'Yes, deactivate'}</button>
+        <a class="btn btn-secondary" href="/app/admin/users">Cancel</a>
+      </form>
+    </div>`,
   });
 }
 
@@ -354,6 +424,7 @@ function register(router) {
     }
     ctx.redirect('/app/admin/sample');
   });
+  router.get('/app/admin/sample/remove', ...A, sampleRemoveConfirm);
   router.post('/app/admin/sample/remove', ...AP, async (ctx) => {
     await removeSample(ctx.app.db);
     ctx.app.log(`[admin] sample data removed by=${ctx.user.id}`);
@@ -380,6 +451,7 @@ function register(router) {
     setFlash(ctx, 'ok', 'Template saved.');
     ctx.redirect('/app/admin/templates');
   });
+  router.get('/app/admin/templates/:id/delete', ...A, templateDeleteConfirm);
   router.post('/app/admin/templates/:id/delete', ...AP, async (ctx) => {
     const t = await getTemplate(ctx.app.db, ctx.params.id);
     // emails_sent.template_id is nulled explicitly rather than relying on ON DELETE SET NULL.
@@ -482,7 +554,7 @@ function register(router) {
       setFlash(ctx, 'error', 'A display name is required (up to 200 characters).');
     } else {
       await db.run('UPDATE users SET name = ? WHERE id = ?', [name, u.id]);
-      setFlash(ctx, 'ok', `Name saved for ${u.email}.`);
+      setFlash(ctx, 'ok', `Name saved for ${name}.`);
     }
     ctx.redirect('/app/admin/users');
   });
@@ -498,8 +570,18 @@ function register(router) {
     // Demoting is guarded inside the UPDATE: not yourself, never the last active admin who has a password.
     const r = await db.run(`UPDATE users SET role = ? WHERE id = ? AND (? = 'admin' OR (id != ? AND ${NOT_LAST_ADMIN}))`, [role, u.id, role, ctx.user.id]);
     if (r.changes === 0) setFlash(ctx, 'error', 'You cannot remove the last active admin.');
-    else setFlash(ctx, 'ok', `${u.email} is now ${role === 'admin' ? 'an admin' : 'a rep'}.`);
+    else setFlash(ctx, 'ok', `${u.name || u.email} is now ${role === 'admin' ? 'an admin' : 'a rep'}.`);
     ctx.redirect('/app/admin/users');
+  });
+  router.get('/app/admin/users/:id/deactivate', ...A, async (ctx) => {
+    const { db } = ctx.app;
+    const u = await getUser(db, ctx.params.id);
+    if (u.id === ctx.user.id) {
+      setFlash(ctx, 'error', 'You cannot deactivate yourself.');
+      return ctx.redirect('/app/admin/users');
+    }
+    if (!u.active) return ctx.redirect('/app/admin/users');
+    await deactivatePage(ctx, u, await db.all('SELECT id, title, status FROM job_roles WHERE assigned_user_id = ? ORDER BY title', [u.id]));
   });
   router.post('/app/admin/users/:id/deactivate', ...AP, async (ctx) => {
     const { db } = ctx.app;
@@ -509,22 +591,7 @@ function register(router) {
       return ctx.redirect('/app/admin/users');
     }
     const roles = await db.all('SELECT id, title, status FROM job_roles WHERE assigned_user_id = ? ORDER BY title', [u.id]);
-    if (roles.length && ctx.form.get('confirm') !== '1') {
-      return page(ctx, {
-        title: 'Deactivate user',
-        body: html`<div class="card card-danger centred-card">
-          <h1>Deactivate ${u.name || u.email}?</h1>
-          <p class="flash flash-error">Warning: ${u.name || u.email} is still the assigned rep for ${roles.length} role${roles.length === 1 ? '' : 's'}.</p>
-          <ul>${roles.map((r) => html`<li><a href="/app/roles/${r.id}">${r.title}</a>${r.status === 'closed' ? ' (closed)' : ''}</li>`)}</ul>
-          <p>Reassign ${roles.length === 1 ? 'this role' : 'these roles'} after deactivating.</p>
-          <form method="post" action="/app/admin/users/${u.id}/deactivate" class="form-actions">
-            ${csrfField(ctx)}<input type="hidden" name="confirm" value="1">
-            <button type="submit" class="btn btn-danger">Deactivate anyway</button>
-            <a class="btn btn-secondary" href="/app/admin/users">Cancel</a>
-          </form>
-        </div>`,
-      });
-    }
+    if (roles.length && ctx.form.get('confirm') !== '1') return deactivatePage(ctx, u, roles);
     // One atomic batch. The last-admin and not-yourself guards are inside the UPDATE; sessions and unused
     // links are only removed once the user really is inactive.
     const results = await db.batch([
@@ -533,14 +600,14 @@ function register(router) {
       { sql: 'DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 0)', args: [u.id, u.id] },
     ]);
     if (results[0].changes === 0) setFlash(ctx, 'error', 'You cannot deactivate the last active admin.');
-    else setFlash(ctx, 'ok', `${u.email} deactivated.`);
+    else setFlash(ctx, 'ok', `${u.name || u.email} deactivated.`);
     ctx.redirect('/app/admin/users');
   });
   router.post('/app/admin/users/:id/reactivate', ...AP, async (ctx) => {
     const { db } = ctx.app;
     const u = await getUser(db, ctx.params.id);
     await db.run('UPDATE users SET active = 1 WHERE id = ?', [u.id]);
-    setFlash(ctx, 'ok', `${u.email} reactivated.`);
+    setFlash(ctx, 'ok', 'Reactivated. Create a reset link so they can sign in.');
     ctx.redirect('/app/admin/users');
   });
 }

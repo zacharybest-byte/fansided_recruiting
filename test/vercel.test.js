@@ -316,7 +316,9 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       await admin.login('admin@fansided.com');
       const page = await admin.get('/app/admin/sample');
       assert.match(page.text, /Load sample data/);
-      assert.match(page.text, /data-confirm=/);
+      assert.doesNotMatch(page.text, /data-confirm/);
+      assert.match(page.text, /<button type="button" class="btn btn-danger" disabled>Remove sample data<\/button>/); // nothing loaded yet
+      assert.equal((await rep.get('/app/admin/sample/remove')).status, 403);
       assert.match(admin.lastHtml, /href="\/app\/admin\/sample"/);
       const load = await admin.post('/app/admin/sample/load');
       assert.equal(load.status, 303);
@@ -346,7 +348,14 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       await t.db.run('UPDATE job_roles SET status = ? WHERE id = ?', ['open', keepRole]);
       assert.equal((await t.client().apply(keepRole, { name: 'Real Applicant', email: 'real2@fansided-test.com', answer_0: 'x' })).status, 303);
 
-      await admin.get('/app/admin/sample');
+      // Remove goes through a server-rendered confirmation page whose button POSTs with the CSRF token.
+      const loadedPage = await admin.get('/app/admin/sample');
+      assert.match(loadedPage.text, /<a class="btn btn-danger" href="\/app\/admin\/sample\/remove">Remove sample data<\/a>/);
+      const confirmPage = await admin.get('/app/admin/sample/remove');
+      assert.equal(confirmPage.status, 200);
+      assert.match(confirmPage.text, /<h1>Remove the sample data\?<\/h1>/);
+      assert.match(confirmPage.text, /<form method="post" action="\/app\/admin\/sample\/remove"[^>]*>\s*<input type="hidden" name="csrf"/);
+      assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18, 'GET changes nothing');
       const logBefore = await count(t.db, 'deletion_log');
       const remove = await admin.post('/app/admin/sample/remove');
       assert.equal(remove.status, 303);
