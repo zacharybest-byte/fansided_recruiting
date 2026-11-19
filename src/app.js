@@ -11,15 +11,21 @@ const { loadSession, requireAdmin } = require('./lib/auth');
 const { errorPage } = require('./lib/layout');
 const { dummyHash } = require('./lib/password');
 
-const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const STATIC_TYPES = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
+// The two assets are read by literal path so Vercel's file tracer bundles them with whichever file it uses as
+// the function entry point. A missing file is tolerated: the request falls through to the CDN copy (see handle()).
 function loadStatic() {
   const files = new Map();
-  for (const name of fs.readdirSync(PUBLIC_DIR)) {
-    const ext = path.extname(name);
-    if (STATIC_TYPES[ext]) files.set(`/public/${name}`, { data: fs.readFileSync(path.join(PUBLIC_DIR, name)), type: STATIC_TYPES[ext] });
-  }
+  const add = (name, read) => {
+    try {
+      files.set(`/public/${name}`, { data: read(), type: STATIC_TYPES[path.extname(name)] });
+    } catch {
+      // not bundled: served from the CDN path instead
+    }
+  };
+  add('style.css', () => fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css')));
+  add('app.js', () => fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js')));
   return files;
 }
 
@@ -96,6 +102,10 @@ function createApp(options = {}) {
       if (file && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
         return ctx.send(200, file.data, { 'Content-Type': file.type, 'Cache-Control': 'public, max-age=300' });
       }
+      if (!file && (ctx.path === '/public/style.css' || ctx.path === '/public/app.js') && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
+        res.writeHead(302, { ...securityHeaders(config.production), Location: ctx.path.slice('/public'.length), 'Cache-Control': 'no-store' });
+        return res.end();
+      }
       await ensureReady();
       await loadSession(ctx);
       // Every /app/admin/* path (even unknown ones) is admin-only.
@@ -154,4 +164,16 @@ function createApp(options = {}) {
   };
 }
 
-module.exports = { createApp };
+// Vercel may pick this file (src/app.js) as the function entry point by convention, and then requires its
+// default export to be a request handler. So the module itself IS the handler (one lazily created app per
+// function instance), with createApp attached for api/index.js, src/server.js and the tests.
+let defaultApp = null;
+function defaultHandler(req, res) {
+  if (!defaultApp) defaultApp = createApp();
+  return defaultApp.handler(req, res);
+}
+
+module.exports = defaultHandler;
+module.exports.createApp = createApp;
+module.exports.default = defaultHandler;
+

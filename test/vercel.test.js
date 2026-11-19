@@ -370,3 +370,14 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
     }
   });
 });
+
+// Vercel picked src/app.js as the entry point on the first real deploy and rejected it because the module
+// did not export a request handler. Both possible entry files must export one.
+test('entry points: src/app.js and api/index.js both export a (req, res) handler', () => {
+  const assert = require('node:assert');
+  const appModule = require('../src/app');
+  assert.strictEqual(typeof appModule, 'function');
+  assert.strictEqual(appModule.default, appModule);
+  assert.strictEqual(typeof appModule.createApp, 'function');
+  assert.strictEqual(require('../api/index.js'), appModule);
+});
