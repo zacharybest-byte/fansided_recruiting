@@ -116,6 +116,14 @@ function securityHeaders(production) {
 
 function createContext(req, res, app) {
   const url = new URL(req.url, 'http://internal');
+  // On Vercel, vercel.json rewrites every path to /api/index and the function then sees that as its URL.
+  // The rewrite passes the path the visitor asked for as ?__path=, which is restored here. Asking for
+  // /api/index?__path=/x directly is the same as asking for /x, so this grants nothing extra.
+  if (url.pathname === '/api/index' || url.pathname === '/api/index.js') {
+    const original = url.searchParams.get('__path');
+    url.searchParams.delete('__path');
+    url.pathname = original && original.startsWith('/') && !original.startsWith('//') ? original : '/';
+  }
   const ctx = {
     req,
     res,

@@ -95,7 +95,7 @@ describe('AC-41: Vercel entry', () => {
 
   test('vercel.json routes every path to the function and ships public/**', () => {
     const cfg = JSON.parse(read('vercel.json'));
-    assert.deepEqual(cfg.rewrites, [{ source: '/(.*)', destination: '/api/index' }]);
+    assert.deepEqual(cfg.rewrites, [{ source: '/(.*)', destination: '/api/index?__path=/$1' }]);
     assert.equal(cfg.functions['api/index.js'].includeFiles, 'public/**');
     const headers = cfg.headers.flatMap((h) => h.headers.map((x) => x.key.toLowerCase()));
     for (const k of ['content-security-policy', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'strict-transport-security']) assert.ok(headers.includes(k), k);
@@ -390,4 +390,24 @@ test('embedded assets match public/ (run node scripts/embed-assets.js after edit
   for (const name of ['style.css', 'app.js']) {
     assert.strictEqual(embedded[name], fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'));
   }
+});
+
+// First real deploy: every path except / reached the app as /api/index (the rewrite destination) and got a 404.
+test('rewritten Vercel requests: /api/index?__path=... is served as the original path, query kept', async () => {
+  const assert = require('node:assert');
+  const { createContext } = require('../src/lib/http');
+  const mk = (u) => createContext({ url: u, method: 'GET', headers: {} }, {}, { config: {} });
+  let ctx = mk('/api/index?__path=/setup&token=abc123');
+  assert.strictEqual(ctx.path, '/setup');
+  assert.strictEqual(ctx.query.get('token'), 'abc123');
+  assert.strictEqual(ctx.query.get('__path'), null);
+  assert.strictEqual(mk('/api/index?__path=/roles/3/apply&source=linkedin').path, '/roles/3/apply');
+  assert.strictEqual(mk('/api/index?__path=/public/style.css').path, '/public/style.css');
+  assert.strictEqual(mk('/api/index').path, '/');
+  assert.strictEqual(mk('/api/index?__path=//evil.example').path, '/');
+  assert.strictEqual(mk('/api/index?__path=nope').path, '/');
+  ctx = mk('/login?__path=/app/admin');
+  assert.strictEqual(ctx.path, '/login');
+  const rewrite = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'vercel.json'), 'utf8')).rewrites[0];
+  assert.strictEqual(rewrite.destination, '/api/index?__path=/$1');
 });
