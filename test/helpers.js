@@ -3,14 +3,25 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createApp } = require('../src/server');
-const { nowIso } = require('../src/lib/db');
+const { createApp } = require('../src/app');
+const { createHttpServer } = require('../src/server');
+const { nowIso, openDb, migrate } = require('../src/lib/db');
+const { startFakeTurso } = require('./fake-turso');
 
 let ipCounter = 1;
 
-async function startApp({ env = {}, dataDir, fetchImpl, log } = {}) {
+// Every integration suite runs on both drivers: the local sqlite file, and the Turso HTTP driver
+// against a local fake of /v2/pipeline (test/fake-turso.js).
+const DRIVERS = ['sqlite', 'turso'];
+
+// Starts the app on a random port. `driver` is 'sqlite' or 'turso'. For restarts pass the same
+// `dataDir` (and `fake`, for turso), or use `t.restart()`.
+async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl, log, ownFake: ownFakeOpt } = {}) {
   const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'fsr-test-'));
-  const app = createApp({
+  const ownFake = ownFakeOpt ?? (driver === 'turso' && !fake);
+  const theFake = driver === 'turso' ? fake || (await startFakeTurso()) : null;
+  const dbEnv = driver === 'turso' ? { TURSO_DATABASE_URL: theFake.url, TURSO_AUTH_TOKEN: theFake.token } : {};
+  const instance = createApp({
     env: {
       NODE_ENV: 'test',
       DATA_DIR: dir,
@@ -21,22 +32,57 @@ async function startApp({ env = {}, dataDir, fetchImpl, log } = {}) {
       ADMIN_EMAILS: 'admin@fansided.com',
       TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
       BASE_URL: 'http://localhost',
+      ...dbEnv,
       ...env,
     },
     fetchImpl,
     log: log || (() => {}),
   });
-  const port = await app.listen(0, '127.0.0.1');
-  const base = `http://127.0.0.1:${port}`;
-  return {
-    app,
-    db: app.db,
+  await instance.ready;
+  const server = createHttpServer(instance.handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const t = {
+    driver,
+    app: instance.app,
+    instance,
+    db: instance.db,
+    fake: theFake,
     base,
     dataDir: dir,
     client: (opts) => new Client(base, opts),
     async close({ keepData = false } = {}) {
-      await app.close();
-      if (!keepData) fs.rmSync(dir, { recursive: true, force: true });
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+      await instance.close();
+      if (!keepData) {
+        if (ownFake) await theFake.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    // Tears the whole app down (server, app instance, caches) and builds a new one on the same database.
+    async restart(opts = {}) {
+      await t.close({ keepData: true });
+      return startApp({ driver, env, dataDir: dir, fake: theFake, fetchImpl, log, ownFake, ...opts });
+    },
+  };
+  return t;
+}
+
+// An empty, migrated database on the given driver, without the app (for database-level tests).
+async function freshDb(driver, { fetchImpl } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsr-db-'));
+  const fake = driver === 'turso' ? await startFakeTurso() : null;
+  const db = openDb({ dataDir: dir, tursoUrl: fake && fake.url, tursoToken: fake && fake.token }, { fetchImpl });
+  await migrate(db);
+  return {
+    db,
+    fake,
+    dir,
+    async close() {
+      await db.close();
+      if (fake) await fake.close();
+      fs.rmSync(dir, { recursive: true, force: true });
     },
   };
 }
@@ -135,25 +181,26 @@ class Client {
   }
 }
 
-function makeUser(db, { email, name = email.split('@')[0], role = 'rep', active = 1 }) {
-  const r = db.prepare('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, ?, ?)').run(email, name, role, active, nowIso());
-  return Number(r.lastInsertRowid);
+async function makeUser(db, { email, name = email.split('@')[0], role = 'rep', active = 1 }) {
+  const r = await db.run('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, ?, ?)', [email, name, role, active, nowIso()]);
+  return r.lastInsertRowid;
 }
 
-function makeRole(db, { title = 'Test Role', vertical = 'NFL', site = 'Test Site', status = 'open', assigned = null, questions = [], description = 'A role.' } = {}) {
+async function makeRole(db, { title = 'Test Role', vertical = 'NFL', site = 'Test Site', status = 'open', assigned = null, questions = [], description = 'A role.' } = {}) {
   const now = nowIso();
-  const r = db
-    .prepare('INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(title, vertical, site, description, status, assigned, JSON.stringify(questions), now, now);
-  return Number(r.lastInsertRowid);
+  const r = await db.run(
+    'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [title, vertical, site, description, status, assigned, JSON.stringify(questions), now, now]
+  );
+  return r.lastInsertRowid;
 }
 
 function lastApplication(db) {
-  return db.prepare('SELECT * FROM applications ORDER BY id DESC LIMIT 1').get();
+  return db.get('SELECT * FROM applications ORDER BY id DESC LIMIT 1');
 }
 
-function count(db, table, where = '1=1', ...args) {
-  return db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`).get(...args).n;
+async function count(db, table, where = '1=1', ...args) {
+  return (await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, args)).n;
 }
 
 const pdf = (bytes = 2000) => {
@@ -162,4 +209,4 @@ const pdf = (bytes = 2000) => {
   return b;
 };
 
-module.exports = { startApp, Client, makeUser, makeRole, lastApplication, count, pdf };
+module.exports = { DRIVERS, startApp, freshDb, Client, makeUser, makeRole, lastApplication, count, pdf };

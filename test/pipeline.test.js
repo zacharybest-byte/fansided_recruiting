@@ -1,7 +1,9 @@
 'use strict';
-const { test, before, after } = require('node:test');
+const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
+
+for (const driver of DRIVERS) describe(`[${driver}]`, () => {
 
 let t;
 let rep1;
@@ -19,19 +21,19 @@ function dashboardCounts(htmlText, roleId) {
 }
 
 before(async () => {
-  t = await startApp();
-  rep1 = makeUser(t.db, { email: 'rep1@fansided.com', name: 'Rep One' });
-  rep2 = makeUser(t.db, { email: 'rep2@fansided.com', name: 'Rep Two' });
-  roleA = makeRole(t.db, { title: 'Role A', assigned: rep1 });
-  roleB = makeRole(t.db, { title: 'Role B', assigned: rep2 });
-  roleC = makeRole(t.db, { title: 'Role C', assigned: rep1, status: 'closed' });
+  t = await startApp({ driver });
+  rep1 = await makeUser(t.db, { email: 'rep1@fansided.com', name: 'Rep One' });
+  rep2 = await makeUser(t.db, { email: 'rep2@fansided.com', name: 'Rep Two' });
+  roleA = await makeRole(t.db, { title: 'Role A', assigned: rep1 });
+  roleB = await makeRole(t.db, { title: 'Role B', assigned: rep2 });
+  roleC = await makeRole(t.db, { title: 'Role C', assigned: rep1, status: 'closed' });
 });
 after(() => t.close());
 
 async function applyTo(roleId, email, name = 'Pat Candidate') {
   const res = await t.client().apply(roleId, { email, name });
   assert.equal(res.status, 303);
-  return lastApplication(t.db).id;
+  return (await lastApplication(t.db)).id;
 }
 
 test('AC-18: dashboard shows my roles with per-stage counts; All roles shows every role', async () => {
@@ -39,7 +41,7 @@ test('AC-18: dashboard shows my roles with per-stage counts; All roles shows eve
   await applyTo(roleA, 'd2@example.com');
   await applyTo(roleA, 'd3@example.com');
   await applyTo(roleB, 'd4@example.com');
-  t.db.prepare("UPDATE applications SET stage = 'trial' WHERE id = ?").run(a1);
+  await t.db.run("UPDATE applications SET stage = 'trial' WHERE id = ?", [a1]);
 
   const c = t.client();
   await c.login('rep1@fansided.com');
@@ -79,9 +81,9 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
   const res = await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', return_to: `/app/roles/${roleA}` });
   assert.equal(res.status, 303);
   assert.equal(res.headers.get('location'), `/app/roles/${roleA}`);
-  let app = t.db.prepare('SELECT * FROM applications WHERE id = ?').get(id);
+  let app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
   assert.equal(app.stage, 'reviewing');
-  let events = t.db.prepare('SELECT * FROM application_events WHERE application_id = ? ORDER BY id').all(id);
+  let events = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
   assert.equal(events.length, 2);
   const e = events[1];
   assert.equal(e.type, 'stage_change');
@@ -93,18 +95,18 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
 
   // Picking the current stage again does nothing.
   await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing' });
-  assert.equal(count(t.db, 'application_events', 'application_id = ?', id), 2);
+  assert.equal(await count(t.db, 'application_events', 'application_id = ?', id), 2);
 
-  const snapshot = JSON.stringify(t.db.prepare('SELECT * FROM application_events WHERE application_id = ? ORDER BY id').all(id));
+  const snapshot = JSON.stringify(await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]));
   await c.post(`/app/applications/${id}/stage`, { stage: 'trial' });
   await c.post(`/app/applications/${id}/stage`, { stage: 'passed' });
-  events = t.db.prepare('SELECT * FROM application_events WHERE application_id = ? ORDER BY id').all(id);
+  events = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
   assert.equal(events.length, 4);
   assert.deepEqual(events.map((x) => [x.from_value, x.to_value]), [[null, 'new'], ['new', 'reviewing'], ['reviewing', 'trial'], ['trial', 'passed']]);
   assert.equal(JSON.stringify(events.slice(0, 2)), snapshot); // earlier rows unchanged
   for (let i = 1; i < events.length; i++) assert.ok(events[i].at >= events[i - 1].at);
-  assert.throws(() => t.db.prepare("UPDATE application_events SET to_value = 'x' WHERE id = ?").run(events[0].id), /append-only/);
-  app = t.db.prepare('SELECT * FROM applications WHERE id = ?').get(id);
+  await assert.rejects(t.db.run("UPDATE application_events SET to_value = 'x' WHERE id = ?", [events[0].id]), /append-only/);
+  app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
   assert.equal(app.stage, 'passed');
 
   const page = await c.get(`/app/applications/${id}`);
@@ -130,7 +132,7 @@ test('AC-22: Onboarded with Voltax ID and date saves both, sets onboarded_at and
     assert.match(page.text, /name="voltax_onboarded_on" value="\d{4}-\d{2}-\d{2}"/); // defaults to today
     const res = await c.post(`/app/applications/${id}/stage`, { stage: 'onboarded', voltax_user_id: 'vx-777', voltax_onboarded_on: '2026-11-02' });
     assert.equal(res.status, 303);
-    const app = t.db.prepare('SELECT * FROM applications WHERE id = ?').get(id);
+    const app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
     assert.equal(app.stage, 'onboarded');
     assert.equal(app.voltax_user_id, 'vx-777');
     assert.equal(app.voltax_onboarded_on, '2026-11-02');
@@ -138,7 +140,7 @@ test('AC-22: Onboarded with Voltax ID and date saves both, sets onboarded_at and
     assert.equal(calls.length, 1);
     assert.equal(calls[0].person.email, 'onboard@example.com');
     assert.equal(calls[0].application.id, id);
-    const types = t.db.prepare('SELECT type FROM application_events WHERE application_id = ? ORDER BY id').all(id).map((r) => r.type);
+    const types = (await t.db.all('SELECT type FROM application_events WHERE application_id = ? ORDER BY id', [id])).map((r) => r.type);
     assert.deepEqual(types, ['stage_change', 'stage_change', 'voltax_recorded']);
     const after = await c.follow(res);
     assert.equal(after.status, 200);
@@ -156,21 +158,21 @@ test('AC-23: moving to another role changes where it appears, logs role_change, 
   await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing' });
   await c.post(`/app/applications/${id}/notes`, { body: 'Note before move' });
   await c.post(`/app/applications/${id}/email`, { subject: 'Hello', body: 'Body before move' });
-  const eventsBefore = t.db.prepare('SELECT * FROM application_events WHERE application_id = ? ORDER BY id').all(id);
+  const eventsBefore = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
 
   const res = await c.post(`/app/applications/${id}/role`, { role_id: String(roleB) });
   assert.equal(res.status, 303);
-  const app = t.db.prepare('SELECT * FROM applications WHERE id = ?').get(id);
+  const app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
   assert.equal(app.role_id, roleB);
   assert.equal(app.stage, 'reviewing');
-  const events = t.db.prepare('SELECT * FROM application_events WHERE application_id = ? ORDER BY id').all(id);
+  const events = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
   assert.equal(events.length, eventsBefore.length + 1);
   const last = events[events.length - 1];
   assert.equal(last.type, 'role_change');
   assert.equal(last.from_value, `Role A (#${roleA})`);
   assert.equal(last.to_value, `Role B (#${roleB})`);
-  assert.equal(count(t.db, 'notes', 'application_id = ?', id), 1);
-  assert.equal(count(t.db, 'emails_sent', 'application_id = ?', id), 1);
+  assert.equal(await count(t.db, 'notes', 'application_id = ?', id), 1);
+  assert.equal(await count(t.db, 'emails_sent', 'application_id = ?', id), 1);
 
   const pipeA = await c.get(`/app/roles/${roleA}`);
   assert.doesNotMatch(pipeA.text, /mover@example.com/);
@@ -212,7 +214,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
 });
 
 test('AC-31: reassigning a role updates both dashboards and the next application notifies the new rep', async () => {
-  const role = makeRole(t.db, { title: 'Reassign Me', assigned: rep1 });
+  const role = await makeRole(t.db, { title: 'Reassign Me', assigned: rep1 });
   const c1 = t.client();
   await c1.login('rep1@fansided.com');
   const c2 = t.client();
@@ -223,21 +225,22 @@ test('AC-31: reassigning a role updates both dashboards and the next application
   await c1.get(`/app/roles/${role}`);
   const res = await c1.post(`/app/roles/${role}/assign`, { user_id: String(rep2) });
   assert.equal(res.status, 303);
-  assert.equal(t.db.prepare('SELECT assigned_user_id FROM job_roles WHERE id = ?').get(role).assigned_user_id, rep2);
+  assert.equal((await t.db.get('SELECT assigned_user_id FROM job_roles WHERE id = ?', [role])).assigned_user_id, rep2);
   assert.equal(dashboardCounts((await c1.get('/app')).text, role), null);
   assert.ok(dashboardCounts((await c2.get('/app')).text, role));
 
   // Inactive users cannot be picked.
-  const inactive = makeUser(t.db, { email: 'inactive@fansided.com', active: 0 });
+  const inactive = await makeUser(t.db, { email: 'inactive@fansided.com', active: 0 });
   await c1.get(`/app/roles/${role}`);
   await c1.post(`/app/roles/${role}/assign`, { user_id: String(inactive) });
-  assert.equal(t.db.prepare('SELECT assigned_user_id FROM job_roles WHERE id = ?').get(role).assigned_user_id, rep2);
+  assert.equal((await t.db.get('SELECT assigned_user_id FROM job_roles WHERE id = ?', [role])).assigned_user_id, rep2);
 
-  t.db.exec('DELETE FROM dev_mail_log');
+  await t.db.run('DELETE FROM dev_mail_log');
   await applyTo(role, 'afterreassign@example.com', 'After Reassign');
-  const mail = t.db.prepare('SELECT * FROM dev_mail_log').all();
+  const mail = await t.db.all('SELECT * FROM dev_mail_log');
   assert.equal(mail.length, 1);
   assert.equal(mail[0].to_email, 'rep2@fansided.com');
   assert.equal(mail[0].from_email, 'rep2@fansided.com');
   assert.equal(mail[0].subject, 'New application: After Reassign for Reassign Me');
+});
 });

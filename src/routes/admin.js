@@ -5,7 +5,7 @@ const { page, setFlash, fmtDate } = require('../lib/layout');
 const { requireAdmin, normaliseEmail } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
-const { nowIso, transaction } = require('../lib/db');
+const { nowIso } = require('../lib/db');
 const { MERGE_FIELDS } = require('../lib/email');
 const { idParam } = require('./dashboard');
 
@@ -17,8 +17,8 @@ function fieldError(errors, name) {
 
 // ---------- Templates ----------
 
-function templatesPage(ctx) {
-  const templates = ctx.app.db.prepare('SELECT * FROM email_templates ORDER BY name COLLATE NOCASE').all();
+async function templatesPage(ctx) {
+  const templates = await ctx.app.db.all('SELECT * FROM email_templates ORDER BY name COLLATE NOCASE');
   page(ctx, {
     title: 'Email templates',
     body: html`<h1>Email templates</h1>
@@ -70,21 +70,19 @@ function readTemplate(form) {
   return { t, errors };
 }
 
-function getTemplate(db, id) {
-  const t = db.prepare('SELECT * FROM email_templates WHERE id = ?').get(idParam(id));
+async function getTemplate(db, id) {
+  const t = await db.get('SELECT * FROM email_templates WHERE id = ?', [idParam(id)]);
   if (!t) throw new HttpError(404, 'Template not found');
   return t;
 }
 
 // ---------- Roles ----------
 
-function rolesPage(ctx) {
-  const roles = ctx.app.db
-    .prepare(
-      `SELECT r.*, u.name AS rep_name, u.email AS rep_email, (SELECT COUNT(*) FROM applications a WHERE a.role_id = r.id) AS n
-         FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id ORDER BY r.status = 'closed', r.vertical COLLATE NOCASE, r.title COLLATE NOCASE`
-    )
-    .all();
+async function rolesPage(ctx) {
+  const roles = await ctx.app.db.all(
+    `SELECT r.*, u.name AS rep_name, u.email AS rep_email, (SELECT COUNT(*) FROM applications a WHERE a.role_id = r.id) AS n
+       FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id ORDER BY r.status = 'closed', r.vertical COLLATE NOCASE, r.title COLLATE NOCASE`
+  );
   page(ctx, {
     title: 'Roles',
     body: html`<h1>Roles</h1>
@@ -99,11 +97,11 @@ function rolesPage(ctx) {
   });
 }
 
-function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
+async function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
   const { db } = ctx.app;
   const isNew = !r.id;
-  const verticals = db.prepare("SELECT DISTINCT vertical FROM job_roles WHERE vertical != '' ORDER BY vertical COLLATE NOCASE").all();
-  const users = db.prepare('SELECT id, name, email, active FROM users ORDER BY name COLLATE NOCASE, email').all();
+  const verticals = await db.all("SELECT DISTINCT vertical FROM job_roles WHERE vertical != '' ORDER BY vertical COLLATE NOCASE");
+  const users = await db.all('SELECT id, name, email, active FROM users ORDER BY name COLLATE NOCASE, email');
   const questions = [...(r.questions || [])];
   while (questions.length < MAX_QUESTIONS) questions.push({ text: '', required: false });
   page(ctx, {
@@ -172,29 +170,29 @@ function readRole(ctx) {
   return { r, errors };
 }
 
-function getRole(db, id) {
-  const r = db.prepare('SELECT * FROM job_roles WHERE id = ?').get(idParam(id));
+async function getRole(db, id) {
+  const r = await db.get('SELECT * FROM job_roles WHERE id = ?', [idParam(id)]);
   if (!r) throw new HttpError(404, 'Role not found');
   r.questions = JSON.parse(r.questions_json || '[]');
   return r;
 }
 
-function checkAssignee(db, r, errors, previousId) {
+async function checkAssignee(db, r, errors, previousId) {
   if (r.assigned_user_id === null) return;
-  const u = db.prepare('SELECT id, active FROM users WHERE id = ?').get(r.assigned_user_id);
+  const u = await db.get('SELECT id, active FROM users WHERE id = ?', [r.assigned_user_id]);
   if (!u || (!u.active && u.id !== previousId)) errors.assigned_user_id = 'Pick an active user.';
 }
 
 // ---------- Users ----------
 
-function activeAdminCount(db) {
-  return db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n;
+async function activeAdminCount(db) {
+  return (await db.get("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1")).n;
 }
 
-function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
-  const users = ctx.app.db
-    .prepare('SELECT u.*, (SELECT COUNT(*) FROM job_roles r WHERE r.assigned_user_id = u.id) AS role_count FROM users u ORDER BY u.active DESC, u.name COLLATE NOCASE, u.email')
-    .all();
+async function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
+  const users = await ctx.app.db.all(
+    'SELECT u.*, (SELECT COUNT(*) FROM job_roles r WHERE r.assigned_user_id = u.id) AS role_count FROM users u ORDER BY u.active DESC, u.name COLLATE NOCASE, u.email'
+  );
   page(ctx, {
     title: 'Users',
     status,
@@ -235,11 +233,14 @@ function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
   });
 }
 
-function getUser(db, id) {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(idParam(id));
+async function getUser(db, id) {
+  const u = await db.get('SELECT * FROM users WHERE id = ?', [idParam(id)]);
   if (!u) throw new HttpError(404, 'User not found');
   return u;
 }
+
+// A user row that may not lose its active admin status when it is the last one (checked inside the SQL).
+const NOT_LAST_ADMIN = "(role != 'admin' OR active = 0 OR (SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1) > 1)";
 
 function register(router) {
   const A = [requireAdmin];
@@ -248,25 +249,29 @@ function register(router) {
   // Templates
   router.get('/app/admin/templates', ...A, templatesPage);
   router.get('/app/admin/templates/new', ...A, (ctx) => templateForm(ctx, {}));
-  router.post('/app/admin/templates', ...AP, (ctx) => {
+  router.post('/app/admin/templates', ...AP, async (ctx) => {
     const { t, errors } = readTemplate(ctx.form);
     if (Object.keys(errors).length) return templateForm(ctx, t, { errors, status: 400 });
-    ctx.app.db.prepare('INSERT INTO email_templates (name, subject, body, updated_at) VALUES (?, ?, ?, ?)').run(t.name, t.subject, t.body, nowIso());
+    await ctx.app.db.run('INSERT INTO email_templates (name, subject, body, updated_at) VALUES (?, ?, ?, ?)', [t.name, t.subject, t.body, nowIso()]);
     setFlash(ctx, 'ok', 'Template created.');
     ctx.redirect('/app/admin/templates');
   });
-  router.get('/app/admin/templates/:id', ...A, (ctx) => templateForm(ctx, getTemplate(ctx.app.db, ctx.params.id)));
-  router.post('/app/admin/templates/:id', ...AP, (ctx) => {
-    const existing = getTemplate(ctx.app.db, ctx.params.id);
+  router.get('/app/admin/templates/:id', ...A, async (ctx) => templateForm(ctx, await getTemplate(ctx.app.db, ctx.params.id)));
+  router.post('/app/admin/templates/:id', ...AP, async (ctx) => {
+    const existing = await getTemplate(ctx.app.db, ctx.params.id);
     const { t, errors } = readTemplate(ctx.form);
     if (Object.keys(errors).length) return templateForm(ctx, { ...t, id: existing.id }, { errors, status: 400 });
-    ctx.app.db.prepare('UPDATE email_templates SET name = ?, subject = ?, body = ?, updated_at = ? WHERE id = ?').run(t.name, t.subject, t.body, nowIso(), existing.id);
+    await ctx.app.db.run('UPDATE email_templates SET name = ?, subject = ?, body = ?, updated_at = ? WHERE id = ?', [t.name, t.subject, t.body, nowIso(), existing.id]);
     setFlash(ctx, 'ok', 'Template saved.');
     ctx.redirect('/app/admin/templates');
   });
-  router.post('/app/admin/templates/:id/delete', ...AP, (ctx) => {
-    const t = getTemplate(ctx.app.db, ctx.params.id);
-    ctx.app.db.prepare('DELETE FROM email_templates WHERE id = ?').run(t.id);
+  router.post('/app/admin/templates/:id/delete', ...AP, async (ctx) => {
+    const t = await getTemplate(ctx.app.db, ctx.params.id);
+    // emails_sent.template_id is nulled explicitly rather than relying on ON DELETE SET NULL.
+    await ctx.app.db.batch([
+      { sql: 'UPDATE emails_sent SET template_id = NULL WHERE template_id = ?', args: [t.id] },
+      { sql: 'DELETE FROM email_templates WHERE id = ?', args: [t.id] },
+    ]);
     setFlash(ctx, 'ok', `Template "${t.name}" deleted.`);
     ctx.redirect('/app/admin/templates');
   });
@@ -274,83 +279,86 @@ function register(router) {
   // Roles
   router.get('/app/admin/roles', ...A, rolesPage);
   router.get('/app/admin/roles/new', ...A, (ctx) => roleForm(ctx, { status: 'open', assigned_user_id: ctx.user.id, questions: [] }));
-  router.post('/app/admin/roles', ...AP, (ctx) => {
+  router.post('/app/admin/roles', ...AP, async (ctx) => {
     const { db } = ctx.app;
     const { r, errors } = readRole(ctx);
-    checkAssignee(db, r, errors, null);
+    await checkAssignee(db, r, errors, null);
     if (Object.keys(errors).length) return roleForm(ctx, r, { errors, status: 400 });
     const now = nowIso();
-    const res = db
-      .prepare('INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, now);
+    const res = await db.run(
+      'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, now]
+    );
     setFlash(ctx, 'ok', 'Role created.');
     ctx.redirect(`/app/admin/roles/${res.lastInsertRowid}`);
   });
-  router.get('/app/admin/roles/:id', ...A, (ctx) => roleForm(ctx, getRole(ctx.app.db, ctx.params.id)));
-  router.post('/app/admin/roles/:id', ...AP, (ctx) => {
+  router.get('/app/admin/roles/:id', ...A, async (ctx) => roleForm(ctx, await getRole(ctx.app.db, ctx.params.id)));
+  router.post('/app/admin/roles/:id', ...AP, async (ctx) => {
     const { db } = ctx.app;
-    const existing = getRole(db, ctx.params.id);
+    const existing = await getRole(db, ctx.params.id);
     const { r, errors } = readRole(ctx);
-    checkAssignee(db, r, errors, existing.assigned_user_id);
+    await checkAssignee(db, r, errors, existing.assigned_user_id);
     if (Object.keys(errors).length) return roleForm(ctx, { ...r, id: existing.id }, { errors, status: 400 });
-    db.prepare('UPDATE job_roles SET title = ?, vertical = ?, site_name = ?, description = ?, status = ?, assigned_user_id = ?, questions_json = ?, updated_at = ? WHERE id = ?').run(
-      r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), nowIso(), existing.id
-    );
+    await db.run('UPDATE job_roles SET title = ?, vertical = ?, site_name = ?, description = ?, status = ?, assigned_user_id = ?, questions_json = ?, updated_at = ? WHERE id = ?', [
+      r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), nowIso(), existing.id,
+    ]);
     setFlash(ctx, 'ok', 'Role saved.');
     ctx.redirect(`/app/admin/roles/${existing.id}`);
   });
 
   // Users
   router.get('/app/admin/users', ...A, (ctx) => usersPage(ctx));
-  router.post('/app/admin/users', ...AP, (ctx) => {
+  router.post('/app/admin/users', ...AP, async (ctx) => {
     const { db } = ctx.app;
     const values = { email: normaliseEmail(ctx.form.get('email')), name: ctx.form.get('name').trim(), role: ctx.form.get('role') === 'admin' ? 'admin' : 'rep' };
     const errors = {};
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email) || values.email.length > 254) errors.email = 'Enter a valid email address.';
-    else if (db.prepare('SELECT id FROM users WHERE email = ?').get(values.email)) errors.email = 'A user with this email already exists.';
+    else if (await db.get('SELECT id FROM users WHERE email = ?', [values.email])) errors.email = 'A user with this email already exists.';
     if (!values.name || values.name.length > 200) errors.name = 'Name is required (up to 200 characters).';
     if (Object.keys(errors).length) return usersPage(ctx, { errors, values, status: 400 });
-    db.prepare('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, 1, ?)').run(values.email, values.name, values.role, nowIso());
+    await db.run('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, 1, ?)', [values.email, values.name, values.role, nowIso()]);
     setFlash(ctx, 'ok', `Added ${values.email}.`);
     ctx.redirect('/app/admin/users');
   });
-  router.post('/app/admin/users/:id/name', ...AP, (ctx) => {
+  router.post('/app/admin/users/:id/name', ...AP, async (ctx) => {
     const { db } = ctx.app;
-    const u = getUser(db, ctx.params.id);
+    const u = await getUser(db, ctx.params.id);
     const name = ctx.form.get('name').replace(/\s+/g, ' ').trim();
     if (!name || name.length > 200) {
       setFlash(ctx, 'error', 'A display name is required (up to 200 characters).');
     } else {
-      db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, u.id);
+      await db.run('UPDATE users SET name = ? WHERE id = ?', [name, u.id]);
       setFlash(ctx, 'ok', `Name saved for ${u.email}.`);
     }
     ctx.redirect('/app/admin/users');
   });
-  router.post('/app/admin/users/:id/role', ...AP, (ctx) => {
+  router.post('/app/admin/users/:id/role', ...AP, async (ctx) => {
     const { db } = ctx.app;
-    const u = getUser(db, ctx.params.id);
+    const u = await getUser(db, ctx.params.id);
     const role = ctx.form.get('role') === 'admin' ? 'admin' : 'rep';
     if (role === u.role) return ctx.redirect('/app/admin/users');
-    if (u.role === 'admin' && u.active && activeAdminCount(db) <= 1) {
+    if (u.role === 'admin' && u.active && (await activeAdminCount(db)) <= 1) {
       setFlash(ctx, 'error', 'You cannot remove the last active admin.');
       return ctx.redirect('/app/admin/users');
     }
-    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, u.id);
-    setFlash(ctx, 'ok', `${u.email} is now ${role === 'admin' ? 'an admin' : 'a rep'}.`);
+    // The last-admin rule is repeated inside the UPDATE so a race cannot remove the last admin.
+    const r = await db.run(`UPDATE users SET role = ? WHERE id = ? AND (? = 'admin' OR ${NOT_LAST_ADMIN})`, [role, u.id, role]);
+    if (r.changes === 0) setFlash(ctx, 'error', 'You cannot remove the last active admin.');
+    else setFlash(ctx, 'ok', `${u.email} is now ${role === 'admin' ? 'an admin' : 'a rep'}.`);
     ctx.redirect('/app/admin/users');
   });
-  router.post('/app/admin/users/:id/deactivate', ...AP, (ctx) => {
+  router.post('/app/admin/users/:id/deactivate', ...AP, async (ctx) => {
     const { db } = ctx.app;
-    const u = getUser(db, ctx.params.id);
+    const u = await getUser(db, ctx.params.id);
     if (u.id === ctx.user.id) {
       setFlash(ctx, 'error', 'You cannot deactivate yourself.');
       return ctx.redirect('/app/admin/users');
     }
-    if (u.role === 'admin' && u.active && activeAdminCount(db) <= 1) {
+    if (u.role === 'admin' && u.active && (await activeAdminCount(db)) <= 1) {
       setFlash(ctx, 'error', 'You cannot deactivate the last active admin.');
       return ctx.redirect('/app/admin/users');
     }
-    const roles = db.prepare('SELECT id, title, status FROM job_roles WHERE assigned_user_id = ? ORDER BY title').all(u.id);
+    const roles = await db.all('SELECT id, title, status FROM job_roles WHERE assigned_user_id = ? ORDER BY title', [u.id]);
     if (roles.length && ctx.form.get('confirm') !== '1') {
       return page(ctx, {
         title: 'Deactivate user',
@@ -364,17 +372,20 @@ function register(router) {
           </form>`,
       });
     }
-    transaction(db, () => {
-      db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(u.id);
-      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
-    });
-    setFlash(ctx, 'ok', `${u.email} deactivated.`);
+    // One atomic batch: the last-admin guard is inside the UPDATE, and sessions are only removed once
+    // the user is really inactive.
+    const results = await db.batch([
+      { sql: `UPDATE users SET active = 0 WHERE id = ? AND ${NOT_LAST_ADMIN}`, args: [u.id] },
+      { sql: 'DELETE FROM sessions WHERE user_id = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 0)', args: [u.id, u.id] },
+    ]);
+    if (results[0].changes === 0) setFlash(ctx, 'error', 'You cannot deactivate the last active admin.');
+    else setFlash(ctx, 'ok', `${u.email} deactivated.`);
     ctx.redirect('/app/admin/users');
   });
-  router.post('/app/admin/users/:id/reactivate', ...AP, (ctx) => {
+  router.post('/app/admin/users/:id/reactivate', ...AP, async (ctx) => {
     const { db } = ctx.app;
-    const u = getUser(db, ctx.params.id);
-    db.prepare('UPDATE users SET active = 1 WHERE id = ?').run(u.id);
+    const u = await getUser(db, ctx.params.id);
+    await db.run('UPDATE users SET active = 1 WHERE id = ?', [u.id]);
     setFlash(ctx, 'ok', `${u.email} reactivated.`);
     ctx.redirect('/app/admin/users');
   });

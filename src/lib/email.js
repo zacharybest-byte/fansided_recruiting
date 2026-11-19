@@ -73,13 +73,13 @@ function createMailer({ db, config, google, log }) {
     async deliver(sender, { to, subject, body }) {
       if (!/^[^\s@<>]+@[^\s@<>]+$/.test(String(to))) throw new Error('Invalid recipient address');
       if (mailer.mode === 'log') {
-        const r = db
-          .prepare('INSERT INTO dev_mail_log (from_user_id, from_email, to_email, subject, body, at) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(sender.id, sender.email, to, subject, body, nowIso());
+        const r = await db.run('INSERT INTO dev_mail_log (from_user_id, from_email, to_email, subject, body, at) VALUES (?, ?, ?, ?, ?, ?)', [
+          sender.id, sender.email, to, subject, body, nowIso(),
+        ]);
         log(config.production ? `[email:log] #${r.lastInsertRowid} from user ${sender.id}` : `[email:log] from=${sender.email} to=${to} subject=${JSON.stringify(subject)}`);
         return { messageId: `log-${r.lastInsertRowid}` };
       }
-      const row = db.prepare('SELECT google_refresh_token_enc FROM users WHERE id = ?').get(sender.id);
+      const row = await db.get('SELECT google_refresh_token_enc FROM users WHERE id = ?', [sender.id]);
       if (!row || !row.google_refresh_token_enc) throw new NoTokenError(`No stored Google token for ${sender.email}`);
       let refreshToken;
       try {
@@ -93,7 +93,7 @@ function createMailer({ db, config, google, log }) {
       } catch (err) {
         if (err.code === 'invalid_grant') {
           // Revoked or expired: forget it so the user is asked to sign in again.
-          db.prepare('UPDATE users SET google_refresh_token_enc = NULL WHERE id = ?').run(sender.id);
+          await db.run('UPDATE users SET google_refresh_token_enc = NULL WHERE id = ?', [sender.id]);
         }
         throw err;
       }
@@ -114,10 +114,11 @@ function createMailer({ db, config, google, log }) {
         error = String(err.message || err).slice(0, 1000);
         log(`[email] send failed for application ${application.id} from user ${sender.id}: ${error}`);
       }
-      db.prepare(
+      await db.run(
         `INSERT INTO emails_sent (person_id, application_id, role_id, template_id, sender_user_id, to_email, subject, body,
-           gmail_message_id, status, error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(person.id, application.id, application.role_id, templateId || null, sender.id, person.email, subject, body, messageId, status, error, nowIso());
+           gmail_message_id, status, error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [person.id, application.id, application.role_id, templateId || null, sender.id, person.email, subject, body, messageId, status, error, nowIso()]
+      );
       return { ok: status === 'sent', error };
     },
 
@@ -126,10 +127,8 @@ function createMailer({ db, config, google, log }) {
       const subject = `New application: ${person.name} for ${role.title}`;
       const link = `${config.baseUrl}/app/applications/${applicationId}`;
       const body = `${person.name} <${person.email}> applied for ${role.title}${role.site_name ? ` (${role.site_name})` : ''}.\n\nOpen the candidate: ${link}\n`;
-      const rep = role.assigned_user_id
-        ? db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(role.assigned_user_id)
-        : null;
-      const admin = db.prepare("SELECT * FROM users WHERE role = 'admin' AND active = 1 ORDER BY id LIMIT 1").get();
+      const rep = role.assigned_user_id ? await db.get('SELECT * FROM users WHERE id = ? AND active = 1', [role.assigned_user_id]) : null;
+      const admin = await db.get("SELECT * FROM users WHERE role = 'admin' AND active = 1 ORDER BY id LIMIT 1");
       const recipient = rep || admin;
       if (!recipient) {
         log(`[notify] no rep or admin to notify about application ${applicationId}`);

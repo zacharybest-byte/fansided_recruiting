@@ -18,6 +18,11 @@ function loadConfig(env = process.env) {
     port,
     baseUrl: (env.BASE_URL || `http://localhost:${port}`).replace(/\/+$/, ''),
     dataDir: path.resolve(env.DATA_DIR || './data'),
+    // Database: TURSO_DATABASE_URL set = Turso over HTTP; otherwise a local SQLite file under dataDir.
+    tursoUrl: (env.TURSO_DATABASE_URL || '').trim(),
+    tursoToken: env.TURSO_AUTH_TOKEN || '',
+    // Keys the rate-limit hashes. Engineer B replaces this with a required SESSION_SECRET.
+    secret: env.SESSION_SECRET || 'dev-only-secret-change-me-0123456789abcdef',
     googleClientId: env.GOOGLE_CLIENT_ID || '',
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || '',
     allowedEmailDomains: list(env.ALLOWED_EMAIL_DOMAINS),
@@ -34,6 +39,7 @@ function loadConfig(env = process.env) {
     tokenKey: null,
   };
 
+  if (config.tursoUrl && !config.tursoToken) throw new Error('TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set.');
   if (config.devLogin && production) {
     throw new Error('DEV_LOGIN=1 is refused when NODE_ENV=production.');
   }

@@ -7,7 +7,8 @@ const { html, multiline } = require('../lib/render');
 const { page, HEARD_FROM } = require('../lib/layout');
 const { readForm } = require('../lib/http');
 const { publicField, verifyPublic } = require('../lib/csrf');
-const { transaction, nowIso } = require('../lib/db');
+const { nowIso } = require('../lib/db');
+const { rateKey, allowed, recordStatements } = require('../lib/ratelimit');
 const { randomHex } = require('../lib/crypto');
 const { normaliseEmail } = require('../lib/auth');
 
@@ -17,31 +18,8 @@ const FILE_TYPES = {
   doc: (b) => b.length >= 4 && b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0,
   docx: (b) => b.length >= 2 && b[0] === 0x50 && b[1] === 0x4b, // "PK" (zip container)
 };
-const RATE_LIMIT = 10;
+const RATE_LIMIT = 10; // stored applications / honeypot hits per IP
 const RATE_WINDOW_MS = 60 * 60 * 1000;
-
-function createRateLimiter(limit = RATE_LIMIT, windowMs = RATE_WINDOW_MS) {
-  const hits = new Map();
-  const recent = (key, now) => (hits.get(key) || []).filter((t) => now - t < windowMs);
-  return {
-    // True while the caller has fewer than `limit` recorded submissions in the window.
-    allowed(key, now = Date.now()) {
-      return recent(key, now).length < limit;
-    },
-    // Records one submission (only stored applications and honeypot hits are recorded).
-    record(key, now = Date.now()) {
-      const list = recent(key, now);
-      list.push(now);
-      hits.set(key, list);
-      if (hits.size > 10000) {
-        for (const [k, v] of hits) if (!v.some((t) => now - t < windowMs)) hits.delete(k);
-      }
-    },
-    reset() {
-      hits.clear();
-    },
-  };
-}
 
 function excerpt(text, max = 160) {
   const line = String(text || '').split(/\r?\n/).find((l) => l.trim()) || '';
@@ -62,18 +40,16 @@ function questionsVersion(role) {
   return crypto.createHash('sha256').update(role.questions_json || '[]').digest('hex').slice(0, 16);
 }
 
-function getRole(db, id) {
+async function getRole(db, id) {
   if (!/^\d+$/.test(String(id))) return null;
-  const role = db.prepare('SELECT * FROM job_roles WHERE id = ?').get(Number(id));
+  const role = await db.get('SELECT * FROM job_roles WHERE id = ?', [Number(id)]);
   if (role) role.questions = JSON.parse(role.questions_json || '[]');
   return role;
 }
 
-function openingsPage(ctx) {
+async function openingsPage(ctx) {
   const source = cleanSource(ctx.query.get('source'));
-  const roles = ctx.app.db
-    .prepare("SELECT * FROM job_roles WHERE status = 'open' ORDER BY vertical COLLATE NOCASE, title COLLATE NOCASE")
-    .all();
+  const roles = await ctx.app.db.all("SELECT * FROM job_roles WHERE status = 'open' ORDER BY vertical COLLATE NOCASE, title COLLATE NOCASE");
   const groups = new Map();
   for (const r of roles) {
     const key = r.vertical || 'Other';
@@ -251,10 +227,11 @@ function validate(form, role, maxUploadBytes) {
 
 async function applySubmit(ctx) {
   const { db, config, mailer, log } = ctx.app;
-  const role = getRole(db, ctx.params.id);
+  const role = await getRole(db, ctx.params.id);
   if (!role || role.status !== 'open') return closedPage(ctx);
 
-  if (!ctx.app.applyLimiter.allowed(ctx.ip)) {
+  const limitKey = rateKey(config.secret, 'apply', ctx.ip);
+  if (!(await allowed(db, limitKey, RATE_LIMIT, RATE_WINDOW_MS))) {
     return page(ctx, {
       title: 'Too many submissions',
       status: 429,
@@ -267,7 +244,7 @@ async function applySubmit(ctx) {
 
   // Honeypot: pretend it worked, save nothing (still counts towards the rate limit).
   if (form.get('website').trim()) {
-    ctx.app.applyLimiter.record(ctx.ip);
+    await db.batch(recordStatements(limitKey));
     return ctx.redirect('/thanks');
   }
 
@@ -290,29 +267,22 @@ async function applySubmit(ctx) {
     fs.writeFileSync(path.join(config.dataDir, storedPath), clean.file.data, { flag: 'wx' });
   }
 
-  let applicationId;
-  let person;
+  // One atomic batch: person upsert, application, first event, rate-limit hit. The application and the event
+  // find their ids in SQL (the person by email, the application via last_insert_rowid()), so no read-then-write.
+  const now = nowIso();
+  let results;
   try {
-    transaction(db, () => {
-      const now = nowIso();
-      person = db.prepare('SELECT * FROM people WHERE email = ?').get(clean.email);
-      if (person) {
-        db.prepare('UPDATE people SET name = ?, linkedin_url = ?, updated_at = ? WHERE id = ?').run(clean.name, clean.linkedin_url, now, person.id);
-      } else {
-        const r = db
-          .prepare('INSERT INTO people (email, name, linkedin_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-          .run(clean.email, clean.name, clean.linkedin_url, now, now);
-        person = { id: Number(r.lastInsertRowid) };
-      }
-      person = { ...person, email: clean.email, name: clean.name };
-      const r = db
-        .prepare(
-          `INSERT INTO applications (person_id, role_id, stage, sample_links, file_path, file_name, answers_json,
-             heard_from, source_tag, applied_at, stage_changed_at)
-           VALUES (?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          person.id,
+    results = await db.batch([
+      {
+        sql: `INSERT INTO people (email, name, linkedin_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(email) DO UPDATE SET name = excluded.name, linkedin_url = excluded.linkedin_url, updated_at = excluded.updated_at`,
+        args: [clean.email, clean.name, clean.linkedin_url, now, now],
+      },
+      {
+        sql: `INSERT INTO applications (person_id, role_id, stage, sample_links, file_path, file_name, answers_json,
+                heard_from, source_tag, applied_at, stage_changed_at)
+              SELECT id, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ?`,
+        args: [
           role.id,
           clean.sample_links,
           storedPath,
@@ -321,19 +291,23 @@ async function applySubmit(ctx) {
           clean.heard_from,
           clean.source_tag,
           now,
-          now
-        );
-      applicationId = Number(r.lastInsertRowid);
-      db.prepare(
-        "INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (?, 'stage_change', NULL, 'new', NULL, ?)"
-      ).run(applicationId, now);
-    });
+          now,
+          clean.email,
+        ],
+      },
+      {
+        sql: "INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (last_insert_rowid(), 'stage_change', NULL, 'new', NULL, ?)",
+        args: [now],
+      },
+      ...recordStatements(limitKey),
+    ]);
   } catch (err) {
     if (storedPath) fs.rmSync(path.join(config.dataDir, storedPath), { force: true });
     throw err;
   }
+  const applicationId = results[1].lastInsertRowid;
+  const person = { email: clean.email, name: clean.name };
 
-  ctx.app.applyLimiter.record(ctx.ip);
   try {
     await mailer.notifyNewApplication({ role, person, applicationId });
   } catch (err) {
@@ -344,8 +318,8 @@ async function applySubmit(ctx) {
 
 function register(router) {
   router.get('/', openingsPage);
-  router.get('/roles/:id', (ctx) => {
-    const role = getRole(ctx.app.db, ctx.params.id);
+  router.get('/roles/:id', async (ctx) => {
+    const role = await getRole(ctx.app.db, ctx.params.id);
     if (!role || role.status !== 'open') return closedPage(ctx);
     applyFormPage(ctx, role);
   });
@@ -366,4 +340,4 @@ function register(router) {
   );
 }
 
-module.exports = { register, createRateLimiter, LIMITS };
+module.exports = { register, LIMITS, RATE_LIMIT, RATE_WINDOW_MS };

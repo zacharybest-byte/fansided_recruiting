@@ -7,7 +7,7 @@ const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, fmtDateTime } = require('
 const { requireUser, requireAdmin } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
-const { transaction, nowIso } = require('../lib/db');
+const { nowIso } = require('../lib/db');
 const { applyMergeFields, firstName, MERGE_FIELDS } = require('../lib/email');
 const { todayIn, isValidYmd } = require('../lib/time');
 const { idParam, stageSelect } = require('./dashboard');
@@ -15,15 +15,14 @@ const voltax = require('../voltax');
 
 const EMAIL_FAILED = 'Email not sent: please sign out and in again.';
 
-function loadApplication(db, id) {
-  const app = db
-    .prepare(
-      `SELECT a.*, r.title AS role_title, r.status AS role_status, r.vertical, r.site_name
-         FROM applications a JOIN job_roles r ON r.id = a.role_id WHERE a.id = ?`
-    )
-    .get(id);
+async function loadApplication(db, id) {
+  const app = await db.get(
+    `SELECT a.*, r.title AS role_title, r.status AS role_status, r.vertical, r.site_name
+       FROM applications a JOIN job_roles r ON r.id = a.role_id WHERE a.id = ?`,
+    [id]
+  );
   if (!app) throw new HttpError(404, 'Application not found');
-  const person = db.prepare('SELECT * FROM people WHERE id = ?').get(app.person_id);
+  const person = await db.get('SELECT * FROM people WHERE id = ?', [app.person_id]);
   return { app, person };
 }
 
@@ -44,44 +43,40 @@ function describeEvent(e) {
   return e.type;
 }
 
-function candidatePage(ctx) {
+async function candidatePage(ctx) {
   const { db, config } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app, person } = loadApplication(db, id);
+  const { app, person } = await loadApplication(db, id);
   const isAdmin = ctx.user.role === 'admin';
-  const roles = db.prepare("SELECT id, title, status, site_name FROM job_roles ORDER BY status = 'closed', title COLLATE NOCASE").all();
+  const roles = await db.all("SELECT id, title, status, site_name FROM job_roles ORDER BY status = 'closed', title COLLATE NOCASE");
   const answers = JSON.parse(app.answers_json || '[]');
-  const notes = db
-    .prepare(
-      `SELECT n.*, u.name AS author_name, u.email AS author_email, r.title AS role_title
-         FROM notes n
-         LEFT JOIN users u ON u.id = n.author_user_id
-         LEFT JOIN job_roles r ON r.id = n.role_id
-        WHERE n.person_id = ? ORDER BY n.created_at DESC, n.id DESC`
-    )
-    .all(person.id);
-  const events = db
-    .prepare(
-      `SELECT e.*, u.name AS actor_name, u.email AS actor_email FROM application_events e
-         LEFT JOIN users u ON u.id = e.actor_user_id WHERE e.application_id = ? ORDER BY e.at, e.id`
-    )
-    .all(app.id);
-  const emails = db
-    .prepare(
-      `SELECT m.*, u.name AS sender_name, u.email AS sender_email, r.title AS role_title
-         FROM emails_sent m
-         LEFT JOIN users u ON u.id = m.sender_user_id
-         LEFT JOIN job_roles r ON r.id = m.role_id
-        WHERE m.person_id = ? ORDER BY m.sent_at DESC, m.id DESC`
-    )
-    .all(person.id);
-  const history = db
-    .prepare(
-      `SELECT a.id, a.stage, a.applied_at, r.title AS role_title FROM applications a JOIN job_roles r ON r.id = a.role_id
-        WHERE a.person_id = ? AND a.id != ? ORDER BY a.applied_at DESC`
-    )
-    .all(person.id, app.id);
-  const templates = db.prepare('SELECT id, name, subject, body FROM email_templates ORDER BY name COLLATE NOCASE').all();
+  const notes = await db.all(
+    `SELECT n.*, u.name AS author_name, u.email AS author_email, r.title AS role_title
+       FROM notes n
+       LEFT JOIN users u ON u.id = n.author_user_id
+       LEFT JOIN job_roles r ON r.id = n.role_id
+      WHERE n.person_id = ? ORDER BY n.created_at DESC, n.id DESC`,
+    [person.id]
+  );
+  const events = await db.all(
+    `SELECT e.*, u.name AS actor_name, u.email AS actor_email FROM application_events e
+       LEFT JOIN users u ON u.id = e.actor_user_id WHERE e.application_id = ? ORDER BY e.at, e.id`,
+    [app.id]
+  );
+  const emails = await db.all(
+    `SELECT m.*, u.name AS sender_name, u.email AS sender_email, r.title AS role_title
+       FROM emails_sent m
+       LEFT JOIN users u ON u.id = m.sender_user_id
+       LEFT JOIN job_roles r ON r.id = m.role_id
+      WHERE m.person_id = ? ORDER BY m.sent_at DESC, m.id DESC`,
+    [person.id]
+  );
+  const history = await db.all(
+    `SELECT a.id, a.stage, a.applied_at, r.title AS role_title FROM applications a JOIN job_roles r ON r.id = a.role_id
+      WHERE a.person_id = ? AND a.id != ? ORDER BY a.applied_at DESC`,
+    [person.id, app.id]
+  );
+  const templates = await db.all('SELECT id, name, subject, body FROM email_templates ORDER BY name COLLATE NOCASE');
 
   // Email composer: "Load" is a plain GET (?template=ID) so it works without JS.
   let draft = { subject: '', body: '', templateId: '', unknown: [] };
@@ -248,7 +243,7 @@ function candidatePage(ctx) {
 async function changeStage(ctx) {
   const { db, config, log } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app, person } = loadApplication(db, id);
+  const { app, person } = await loadApplication(db, id);
   const back = returnTo(ctx, `/app/applications/${id}`);
   const stage = ctx.form.get('stage');
   if (!STAGES.includes(stage)) {
@@ -265,22 +260,41 @@ async function changeStage(ctx) {
   }
   if (voltaxId && !voltaxOn) voltaxOn = todayIn(config.timezone);
 
+  // One atomic batch. The events are inserted first and only if the application is still in the stage we
+  // compared against; the UPDATE carries the same guard, so a concurrent change produces no event rows.
   const now = nowIso();
-  transaction(db, () => {
-    db.prepare('UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?').run(stage, now, id);
-    db.prepare("INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (?, 'stage_change', ?, ?, ?, ?)").run(
-      id, app.stage, stage, ctx.user.id, now
-    );
-    if (stage === 'onboarded') {
-      db.prepare('UPDATE applications SET onboarded_at = ? WHERE id = ?').run(now, id);
-      if (voltaxId) {
-        db.prepare('UPDATE applications SET voltax_user_id = ?, voltax_onboarded_on = ? WHERE id = ?').run(voltaxId, voltaxOn, id);
-        db.prepare("INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (?, 'voltax_recorded', ?, ?, ?, ?)").run(
-          id, app.voltax_user_id || null, `${voltaxId} (onboarded ${voltaxOn})`, ctx.user.id, now
-        );
-      }
+  const guard = 'EXISTS (SELECT 1 FROM applications WHERE id = ? AND stage = ?)';
+  const statements = [
+    {
+      sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+            SELECT ?, 'stage_change', ?, ?, ?, ? WHERE ${guard}`,
+      args: [id, app.stage, stage, ctx.user.id, now, id, app.stage],
+    },
+  ];
+  const recordVoltaxHere = stage === 'onboarded' && voltaxId;
+  if (recordVoltaxHere) {
+    statements.push({
+      sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+            SELECT ?, 'voltax_recorded', (SELECT voltax_user_id FROM applications WHERE id = ?), ?, ?, ? WHERE ${guard}`,
+      args: [id, id, `${voltaxId} (onboarded ${voltaxOn})`, ctx.user.id, now, id, app.stage],
+    });
+  }
+  const sets = ['stage = ?', 'stage_changed_at = ?'];
+  const setArgs = [stage, now];
+  if (stage === 'onboarded') {
+    sets.push('onboarded_at = ?');
+    setArgs.push(now);
+    if (voltaxId) {
+      sets.push('voltax_user_id = ?', 'voltax_onboarded_on = ?');
+      setArgs.push(voltaxId, voltaxOn);
     }
-  });
+  }
+  statements.push({ sql: `UPDATE applications SET ${sets.join(', ')} WHERE id = ? AND stage = ?`, args: [...setArgs, id, app.stage] });
+  const results = await db.batch(statements);
+  if (results[results.length - 1].changes === 0) {
+    setFlash(ctx, 'error', 'Someone else changed this candidate at the same time. Nothing was saved: please check the page and try again.');
+    return ctx.redirect(back);
+  }
 
   let message = `Moved ${person.name} to ${STAGE_LABELS[stage]}.`;
   if (stage === 'onboarded') {
@@ -302,59 +316,65 @@ async function changeStage(ctx) {
   ctx.redirect(back);
 }
 
-function recordVoltax(ctx) {
+async function recordVoltax(ctx) {
   const { db, config } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app } = loadApplication(db, id);
+  await loadApplication(db, id);
   const voltaxId = ctx.form.get('voltax_user_id').trim().slice(0, 100);
   const on = ctx.form.get('voltax_onboarded_on').trim() || todayIn(config.timezone);
   if (!voltaxId || !isValidYmd(on)) {
     setFlash(ctx, 'error', 'Enter a Voltax user ID and a valid date.');
     return ctx.redirect(`/app/applications/${id}`);
   }
-  const now = nowIso();
-  transaction(db, () => {
-    db.prepare('UPDATE applications SET voltax_user_id = ?, voltax_onboarded_on = ? WHERE id = ?').run(voltaxId, on, id);
-    db.prepare("INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (?, 'voltax_recorded', ?, ?, ?, ?)").run(
-      id, app.voltax_user_id || null, `${voltaxId} (onboarded ${on})`, ctx.user.id, now
-    );
-  });
+  // The event takes its "from" value from the row itself, in the same atomic batch as the update.
+  await db.batch([
+    {
+      sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+            SELECT id, 'voltax_recorded', voltax_user_id, ?, ?, ? FROM applications WHERE id = ?`,
+      args: [`${voltaxId} (onboarded ${on})`, ctx.user.id, nowIso(), id],
+    },
+    { sql: 'UPDATE applications SET voltax_user_id = ?, voltax_onboarded_on = ? WHERE id = ?', args: [voltaxId, on, id] },
+  ]);
   setFlash(ctx, 'ok', 'Voltax details saved.');
   ctx.redirect(`/app/applications/${id}`);
 }
 
-function moveRole(ctx) {
+async function moveRole(ctx) {
   const { db } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app } = loadApplication(db, id);
-  const target = db.prepare('SELECT id, title FROM job_roles WHERE id = ?').get(Number(ctx.form.get('role_id')));
+  const { app } = await loadApplication(db, id);
+  const target = await db.get('SELECT id, title FROM job_roles WHERE id = ?', [Number(ctx.form.get('role_id'))]);
   if (!target) {
     setFlash(ctx, 'error', 'Pick a role.');
     return ctx.redirect(`/app/applications/${id}`);
   }
   if (target.id === app.role_id) return ctx.redirect(`/app/applications/${id}`);
   const now = nowIso();
-  transaction(db, () => {
-    db.prepare('UPDATE applications SET role_id = ? WHERE id = ?').run(target.id, id);
-    db.prepare("INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (?, 'role_change', ?, ?, ?, ?)").run(
-      id, `${app.role_title} (#${app.role_id})`, `${target.title} (#${target.id})`, ctx.user.id, now
-    );
-  });
-  setFlash(ctx, 'ok', `Moved to ${target.title}.`);
+  // Event first, guarded by the role we compared against; the UPDATE carries the same guard.
+  const results = await db.batch([
+    {
+      sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+            SELECT ?, 'role_change', ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM applications WHERE id = ? AND role_id = ?)`,
+      args: [id, `${app.role_title} (#${app.role_id})`, `${target.title} (#${target.id})`, ctx.user.id, now, id, app.role_id],
+    },
+    { sql: 'UPDATE applications SET role_id = ? WHERE id = ? AND role_id = ?', args: [target.id, id, app.role_id] },
+  ]);
+  if (results[1].changes === 0) setFlash(ctx, 'error', 'Someone else changed this candidate at the same time. Nothing was saved.');
+  else setFlash(ctx, 'ok', `Moved to ${target.title}.`);
   ctx.redirect(`/app/applications/${id}`);
 }
 
-function addNote(ctx) {
+async function addNote(ctx) {
   const { db } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app } = loadApplication(db, id);
+  const { app } = await loadApplication(db, id);
   const body = ctx.form.get('body').replace(/\r\n/g, '\n').trim();
   if (!body || body.length > 5000) {
     setFlash(ctx, 'error', 'A note must be between 1 and 5,000 characters.');
   } else {
-    db.prepare('INSERT INTO notes (person_id, application_id, role_id, author_user_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
-      app.person_id, app.id, app.role_id, ctx.user.id, body, nowIso()
-    );
+    await db.run('INSERT INTO notes (person_id, application_id, role_id, author_user_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)', [
+      app.person_id, app.id, app.role_id, ctx.user.id, body, nowIso(),
+    ]);
     setFlash(ctx, 'ok', 'Note added.');
   }
   ctx.redirect(`/app/applications/${id}#notes`);
@@ -363,7 +383,7 @@ function addNote(ctx) {
 async function sendEmail(ctx) {
   const { db, mailer } = ctx.app;
   const id = idParam(ctx.params.id);
-  const { app, person } = loadApplication(db, id);
+  const { app, person } = await loadApplication(db, id);
   const subject = ctx.form.get('subject').replace(/[\r\n]+/g, ' ').trim().slice(0, 300);
   const body = ctx.form.get('body').replace(/\r\n/g, '\n').trim().slice(0, 20000);
   if (!subject || !body) {
@@ -371,18 +391,18 @@ async function sendEmail(ctx) {
     return ctx.redirect(`/app/applications/${id}#email`);
   }
   const tplId = Number(ctx.form.get('template_id'));
-  const template = tplId ? db.prepare('SELECT id FROM email_templates WHERE id = ?').get(tplId) : null;
-  const sender = db.prepare('SELECT * FROM users WHERE id = ?').get(ctx.user.id);
+  const template = tplId ? await db.get('SELECT id FROM email_templates WHERE id = ?', [tplId]) : null;
+  const sender = await db.get('SELECT * FROM users WHERE id = ?', [ctx.user.id]);
   const result = await mailer.sendCandidateEmail({ sender, application: app, person, templateId: template ? template.id : null, subject, body });
   if (result.ok) setFlash(ctx, 'ok', `Email sent to ${person.email}.`);
   else setFlash(ctx, 'error', EMAIL_FAILED);
   ctx.redirect(`/app/applications/${id}#activity`);
 }
 
-function downloadFile(ctx) {
+async function downloadFile(ctx) {
   const { db, config } = ctx.app;
   const id = idParam(ctx.params.id);
-  const app = db.prepare('SELECT file_path, file_name FROM applications WHERE id = ?').get(id);
+  const app = await db.get('SELECT file_path, file_name FROM applications WHERE id = ?', [id]);
   if (!app || !app.file_path || !/^uploads\/[0-9a-f]+\.(pdf|docx?)$/.test(app.file_path)) throw new HttpError(404, 'No file');
   let data;
   try {
@@ -400,12 +420,12 @@ function downloadFile(ctx) {
   });
 }
 
-function deleteConfirm(ctx) {
+async function deleteConfirm(ctx) {
   const { db } = ctx.app;
   const pid = idParam(ctx.params.id);
-  const person = db.prepare('SELECT * FROM people WHERE id = ?').get(pid);
+  const person = await db.get('SELECT * FROM people WHERE id = ?', [pid]);
   if (!person) throw new HttpError(404, 'Person not found');
-  const apps = db.prepare('SELECT a.id, r.title FROM applications a JOIN job_roles r ON r.id = a.role_id WHERE a.person_id = ?').all(pid);
+  const apps = await db.all('SELECT a.id, r.title FROM applications a JOIN job_roles r ON r.id = a.role_id WHERE a.person_id = ?', [pid]);
   const from = /^\d+$/.test(ctx.query.get('from') || '') ? ctx.query.get('from') : null;
   page(ctx, {
     title: 'Delete candidate',
@@ -420,21 +440,26 @@ function deleteConfirm(ctx) {
   });
 }
 
-function deletePerson(ctx) {
+async function deletePerson(ctx) {
   const { db, config, log } = ctx.app;
   const pid = idParam(ctx.params.id);
-  const person = db.prepare('SELECT id FROM people WHERE id = ?').get(pid);
+  const person = await db.get('SELECT id FROM people WHERE id = ?', [pid]);
   if (!person) throw new HttpError(404, 'Person not found');
-  const files = db.prepare('SELECT file_path FROM applications WHERE person_id = ? AND file_path IS NOT NULL').all(pid).map((r) => r.file_path);
-  transaction(db, () => {
-    const appIds = 'SELECT id FROM applications WHERE person_id = ?';
-    db.prepare(`DELETE FROM emails_sent WHERE person_id = ? OR application_id IN (${appIds})`).run(pid, pid);
-    db.prepare(`DELETE FROM notes WHERE person_id = ? OR application_id IN (${appIds})`).run(pid, pid);
-    db.prepare(`DELETE FROM application_events WHERE application_id IN (${appIds})`).run(pid);
-    db.prepare('DELETE FROM applications WHERE person_id = ?').run(pid);
-    db.prepare('DELETE FROM people WHERE id = ?').run(pid);
-    db.prepare('INSERT INTO deletion_log (deleted_person_id, actor_user_id, at) VALUES (?, ?, ?)').run(pid, ctx.user.id, nowIso());
-  });
+  const files = (await db.all('SELECT file_path FROM applications WHERE person_id = ? AND file_path IS NOT NULL', [pid])).map((r) => r.file_path);
+  // One atomic batch with explicit deletes in dependency order (nothing relies on foreign key cascades).
+  // The deletion_log row is written while the person still exists, so it only appears for a real deletion.
+  const appIds = 'SELECT id FROM applications WHERE person_id = ?';
+  await db.batch([
+    { sql: `DELETE FROM emails_sent WHERE person_id = ? OR application_id IN (${appIds})`, args: [pid, pid] },
+    { sql: `DELETE FROM notes WHERE person_id = ? OR application_id IN (${appIds})`, args: [pid, pid] },
+    { sql: `DELETE FROM application_events WHERE application_id IN (${appIds})`, args: [pid] },
+    { sql: 'DELETE FROM applications WHERE person_id = ?', args: [pid] },
+    {
+      sql: 'INSERT INTO deletion_log (deleted_person_id, actor_user_id, at) SELECT id, ?, ? FROM people WHERE id = ?',
+      args: [ctx.user.id, nowIso(), pid],
+    },
+    { sql: 'DELETE FROM people WHERE id = ?', args: [pid] },
+  ]);
   for (const f of files) {
     try {
       fs.rmSync(path.join(config.dataDir, f), { force: true });

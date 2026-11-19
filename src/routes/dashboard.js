@@ -20,19 +20,18 @@ function stageSelect(current, name = 'stage') {
   </select>`;
 }
 
-function dashboard(ctx) {
+async function dashboard(ctx) {
   const { db } = ctx.app;
   const showAll = ctx.query.get('view') === 'all';
-  const roles = db
-    .prepare(
-      `SELECT r.*, u.name AS rep_name, u.email AS rep_email
-         FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id
-        ${showAll ? '' : 'WHERE r.assigned_user_id = ?'}
-        ORDER BY r.status = 'closed', r.title COLLATE NOCASE`
-    )
-    .all(...(showAll ? [] : [ctx.user.id]));
+  const roles = await db.all(
+    `SELECT r.*, u.name AS rep_name, u.email AS rep_email
+       FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id
+      ${showAll ? '' : 'WHERE r.assigned_user_id = ?'}
+      ORDER BY r.status = 'closed', r.title COLLATE NOCASE`,
+    showAll ? [] : [ctx.user.id]
+  );
   const counts = new Map();
-  for (const row of db.prepare('SELECT role_id, stage, COUNT(*) AS n FROM applications GROUP BY role_id, stage').all()) {
+  for (const row of await db.all('SELECT role_id, stage, COUNT(*) AS n FROM applications GROUP BY role_id, stage')) {
     if (!counts.has(row.role_id)) counts.set(row.role_id, {});
     counts.get(row.role_id)[row.stage] = row.n;
   }
@@ -65,21 +64,18 @@ function dashboard(ctx) {
   });
 }
 
-function rolePipeline(ctx) {
+async function rolePipeline(ctx) {
   const { db } = ctx.app;
   const roleId = idParam(ctx.params.id);
-  const role = db
-    .prepare('SELECT r.*, u.name AS rep_name, u.email AS rep_email FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id WHERE r.id = ?')
-    .get(roleId);
+  const role = await db.get('SELECT r.*, u.name AS rep_name, u.email AS rep_email FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id WHERE r.id = ?', [roleId]);
   if (!role) throw new HttpError(404, 'Role not found');
-  const users = db.prepare('SELECT id, name, email FROM users WHERE active = 1 ORDER BY name COLLATE NOCASE, email').all();
-  const apps = db
-    .prepare(
-      `SELECT a.id, a.stage, a.applied_at, a.stage_changed_at, a.source_tag, p.name, p.email
-         FROM applications a JOIN people p ON p.id = a.person_id
-        WHERE a.role_id = ? ORDER BY a.applied_at DESC`
-    )
-    .all(roleId);
+  const users = await db.all('SELECT id, name, email FROM users WHERE active = 1 ORDER BY name COLLATE NOCASE, email');
+  const apps = await db.all(
+    `SELECT a.id, a.stage, a.applied_at, a.stage_changed_at, a.source_tag, p.name, p.email
+       FROM applications a JOIN people p ON p.id = a.person_id
+      WHERE a.role_id = ? ORDER BY a.applied_at DESC`,
+    [roleId]
+  );
   const returnTo = `/app/roles/${roleId}`;
   page(ctx, {
     title: role.title,
@@ -136,17 +132,17 @@ function rolePipeline(ctx) {
   });
 }
 
-function reassign(ctx) {
+async function reassign(ctx) {
   const { db } = ctx.app;
   const roleId = idParam(ctx.params.id);
-  const role = db.prepare('SELECT id FROM job_roles WHERE id = ?').get(roleId);
+  const role = await db.get('SELECT id FROM job_roles WHERE id = ?', [roleId]);
   if (!role) throw new HttpError(404, 'Role not found');
   const userId = Number(ctx.form.get('user_id')) || 0;
-  const user = db.prepare('SELECT id, name, email FROM users WHERE id = ? AND active = 1').get(userId);
+  const user = await db.get('SELECT id, name, email FROM users WHERE id = ? AND active = 1', [userId]);
   if (!user) {
     setFlash(ctx, 'error', 'Choose an active user to assign this role to.');
   } else {
-    db.prepare('UPDATE job_roles SET assigned_user_id = ?, updated_at = ? WHERE id = ?').run(user.id, nowIso(), roleId);
+    await db.run('UPDATE job_roles SET assigned_user_id = ?, updated_at = ? WHERE id = ?', [user.id, nowIso(), roleId]);
     setFlash(ctx, 'ok', `Role reassigned to ${user.name || user.email}.`);
   }
   ctx.redirect(`/app/roles/${roleId}`);
@@ -170,7 +166,7 @@ const CSV_COLUMNS = [
   'source_tag', 'heard_from', 'stage', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url',
 ];
 
-function exportCsv(ctx) {
+async function exportCsv(ctx) {
   const { db, config } = ctx.app;
   const tz = config.timezone;
   const from = ctx.query.get('from') || '';
@@ -188,18 +184,17 @@ function exportCsv(ctx) {
     where.push('a.applied_at < ?');
     args.push(zonedMidnightUtc(next, tz).toISOString());
   }
-  const rows = db
-    .prepare(
-      `SELECT a.*, p.name, p.email, p.linkedin_url, r.title AS role_title, r.vertical, r.site_name,
-              COALESCE(NULLIF(u.name, ''), u.email, '') AS assigned_rep
-         FROM applications a
-         JOIN people p ON p.id = a.person_id
-         JOIN job_roles r ON r.id = a.role_id
-         LEFT JOIN users u ON u.id = r.assigned_user_id
-        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-        ORDER BY a.applied_at, a.id`
-    )
-    .all(...args);
+  const rows = await db.all(
+    `SELECT a.*, p.name, p.email, p.linkedin_url, r.title AS role_title, r.vertical, r.site_name,
+            COALESCE(NULLIF(u.name, ''), u.email, '') AS assigned_rep
+       FROM applications a
+       JOIN people p ON p.id = a.person_id
+       JOIN job_roles r ON r.id = a.role_id
+       LEFT JOIN users u ON u.id = r.assigned_user_id
+      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY a.applied_at, a.id`,
+    args
+  );
   const data = rows.map((a) => [
     a.id,
     formatDateTime(a.applied_at, tz),

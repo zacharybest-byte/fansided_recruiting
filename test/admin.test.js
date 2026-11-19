@@ -1,17 +1,20 @@
 'use strict';
-const { test, before, after } = require('node:test');
+const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { startApp, makeUser, makeRole, lastApplication, count, pdf } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count, pdf } = require('./helpers');
 const { CSV_COLUMNS } = require('../src/routes/dashboard');
+const { MIGRATIONS } = require('../src/lib/db');
+
+for (const driver of DRIVERS) describe(`[${driver}]`, () => {
 
 let t;
 let admin;
 
 before(async () => {
-  t = await startApp();
-  makeUser(t.db, { email: 'rep@fansided.com', name: 'Rita Rep' });
+  t = await startApp({ driver });
+  await makeUser(t.db, { email: 'rep@fansided.com', name: 'Rita Rep' });
   admin = t.client();
   await admin.login('admin@fansided.com');
 });
@@ -47,7 +50,7 @@ function parseCsv(text) {
 
 test('AC-29: admin creates a role with 5 questions, edits it and closes it; closed roles leave / but stay internal', async () => {
   await admin.get('/app/admin/roles/new');
-  const repId = t.db.prepare("SELECT id FROM users WHERE email = 'rep@fansided.com'").get().id;
+  const repId = (await t.db.get("SELECT id FROM users WHERE email = 'rep@fansided.com'")).id;
   const fields = { title: 'Packers Writer', vertical: 'NFL', site_name: 'Lombardi Ave', description: 'Line 1\nLine 2', status: 'open', assigned_user_id: String(repId) };
   for (let i = 0; i < 5; i++) fields[`q_text_${i}`] = `Question ${i + 1}?`;
   fields.q_required_0 = '1';
@@ -55,7 +58,7 @@ test('AC-29: admin creates a role with 5 questions, edits it and closes it; clos
   fields.q_text_5 = 'A sixth question is ignored';
   let res = await admin.post('/app/admin/roles', fields);
   assert.equal(res.status, 303);
-  const role = t.db.prepare("SELECT * FROM job_roles WHERE title = 'Packers Writer'").get();
+  const role = await t.db.get("SELECT * FROM job_roles WHERE title = 'Packers Writer'");
   const qs = JSON.parse(role.questions_json);
   assert.equal(qs.length, 5);
   assert.deepEqual(qs.map((q) => q.required), [true, false, false, true, false]);
@@ -73,14 +76,14 @@ test('AC-29: admin creates a role with 5 questions, edits it and closes it; clos
 
   res = await admin.post(`/app/admin/roles/${role.id}`, { ...fields, title: 'Packers Staff Writer', q_text_4: '' });
   assert.equal(res.status, 303);
-  let edited = t.db.prepare('SELECT * FROM job_roles WHERE id = ?').get(role.id);
+  let edited = await t.db.get('SELECT * FROM job_roles WHERE id = ?', [role.id]);
   assert.equal(edited.title, 'Packers Staff Writer');
   assert.equal(JSON.parse(edited.questions_json).length, 4);
 
   assert.match((await t.client().get('/')).text, /Packers Staff Writer/);
   await admin.get(`/app/admin/roles/${role.id}`);
   res = await admin.post(`/app/admin/roles/${role.id}`, { ...fields, title: 'Packers Staff Writer', status: 'closed' });
-  edited = t.db.prepare('SELECT * FROM job_roles WHERE id = ?').get(role.id);
+  edited = await t.db.get('SELECT * FROM job_roles WHERE id = ?', [role.id]);
   assert.equal(edited.status, 'closed');
   assert.doesNotMatch((await t.client().get('/')).text, /Packers Staff Writer/);
   assert.match((await t.client().get(`/roles/${role.id}`)).text, /no longer open/);
@@ -104,7 +107,7 @@ test('AC-30: add user, promote to admin, deactivate; cannot deactivate self or r
   await admin.get('/app/admin/users');
   let res = await admin.post('/app/admin/users', { email: 'New.Person@FanSided.com', name: 'New Person', role: 'rep' });
   assert.equal(res.status, 303);
-  const u = t.db.prepare("SELECT * FROM users WHERE email = 'new.person@fansided.com'").get();
+  const u = await t.db.get("SELECT * FROM users WHERE email = 'new.person@fansided.com'");
   assert.equal(u.role, 'rep');
   assert.equal(u.active, 1);
   res = await admin.post('/app/admin/users', { email: 'new.person@fansided.com', name: 'Dup', role: 'rep' });
@@ -113,7 +116,7 @@ test('AC-30: add user, promote to admin, deactivate; cannot deactivate self or r
 
   await admin.get('/app/admin/users');
   await admin.post(`/app/admin/users/${u.id}/role`, { role: 'admin' });
-  assert.equal(t.db.prepare('SELECT role FROM users WHERE id = ?').get(u.id).role, 'admin');
+  assert.equal((await t.db.get('SELECT role FROM users WHERE id = ?', [u.id])).role, 'admin');
 
   // New admin can sign in and use admin pages.
   const c = t.client();
@@ -124,59 +127,59 @@ test('AC-30: add user, promote to admin, deactivate; cannot deactivate self or r
   await admin.get('/app/admin/users');
   res = await admin.post(`/app/admin/users/${u.id}/deactivate`, {});
   assert.equal(res.status, 303);
-  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(u.id).active, 0);
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [u.id])).active, 0);
   assert.equal((await c.get('/app')).status, 302);
   assert.equal((await c.login('new.person@fansided.com')).status, 403);
 
   // Cannot deactivate self.
-  const me = t.db.prepare("SELECT id FROM users WHERE email = 'admin@fansided.com'").get().id;
+  const me = (await t.db.get("SELECT id FROM users WHERE email = 'admin@fansided.com'")).id;
   await admin.get('/app/admin/users');
   res = await admin.post(`/app/admin/users/${me}/deactivate`, {});
   let page = await admin.follow(res);
   assert.match(page.text, /You cannot deactivate yourself/);
-  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(me).active, 1);
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [me])).active, 1);
 
   // Cannot demote the last active admin.
   res = await admin.post(`/app/admin/users/${me}/role`, { role: 'rep' });
   page = await admin.follow(res);
   assert.match(page.text, /last active admin/);
-  assert.equal(t.db.prepare('SELECT role FROM users WHERE id = ?').get(me).role, 'admin');
+  assert.equal((await t.db.get('SELECT role FROM users WHERE id = ?', [me])).role, 'admin');
 
   // With two active admins, one can deactivate the other; the remaining admin is then protected
   // (self-deactivation and last-admin demotion are refused above).
-  const other = makeUser(t.db, { email: 'other.admin@fansided.com', role: 'admin' });
+  const other = await makeUser(t.db, { email: 'other.admin@fansided.com', role: 'admin' });
   await admin.get('/app/admin/users');
   res = await admin.post(`/app/admin/users/${other}/deactivate`, {});
-  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(other).active, 0);
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [other])).active, 0);
 
   // Reactivate.
   res = await admin.post(`/app/admin/users/${u.id}/reactivate`, {});
-  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(u.id).active, 1);
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [u.id])).active, 1);
 });
 
 test('AC-30: deactivating a user who still has roles shows a warning first', async () => {
-  const repId = makeUser(t.db, { email: 'busy@fansided.com', name: 'Busy Rep' });
-  makeRole(t.db, { title: 'Busy Role', assigned: repId });
+  const repId = await makeUser(t.db, { email: 'busy@fansided.com', name: 'Busy Rep' });
+  await makeRole(t.db, { title: 'Busy Role', assigned: repId });
   await admin.get('/app/admin/users');
   const res = await admin.post(`/app/admin/users/${repId}/deactivate`, {});
   assert.equal(res.status, 200);
   assert.match(res.text, /Warning: Busy Rep is still the assigned rep/);
   assert.match(res.text, /Busy Role/);
-  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(repId).active, 1);
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [repId])).active, 1);
   const res2 = await admin.post(`/app/admin/users/${repId}/deactivate`, { confirm: '1' });
   assert.equal(res2.status, 303);
-  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(repId).active, 0);
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [repId])).active, 0);
 });
 
 test('AC-32: CSV export columns, one row per application, date filter, formula-injection guard', async () => {
-  const role = makeRole(t.db, { title: 'CSV, "Quoted" Role', vertical: 'NBA', site: 'Hoops' });
+  const role = await makeRole(t.db, { title: 'CSV, "Quoted" Role', vertical: 'NBA', site: 'Hoops' });
   await t.client().apply(role, { name: '=HYPERLINK("http://evil")', email: 'csv1@example.com', heard_from: 'Referral' }, { query: '?source=%2Bplus' });
-  const a1 = lastApplication(t.db).id;
+  const a1 = (await lastApplication(t.db)).id;
   await t.client().apply(role, { name: 'Line\nBreak', email: 'csv2@example.com' });
-  const a2 = lastApplication(t.db).id;
+  const a2 = (await lastApplication(t.db)).id;
   // Late evening of 9 March in New York is already 10 March in UTC.
-  t.db.prepare("UPDATE applications SET applied_at = '2026-03-10T03:30:00.000Z' WHERE id = ?").run(a1);
-  t.db.prepare("UPDATE applications SET applied_at = '2026-03-12T15:00:00.000Z' WHERE id = ?").run(a2);
+  await t.db.run("UPDATE applications SET applied_at = '2026-03-10T03:30:00.000Z' WHERE id = ?", [a1]);
+  await t.db.run("UPDATE applications SET applied_at = '2026-03-12T15:00:00.000Z' WHERE id = ?", [a2]);
 
   const res = await admin.get('/app/export.csv');
   assert.equal(res.status, 200);
@@ -185,7 +188,7 @@ test('AC-32: CSV export columns, one row per application, date filter, formula-i
   const rows = parseCsv(res.text);
   assert.deepEqual(rows[0], CSV_COLUMNS);
   assert.deepEqual(rows[0], ['application_id', 'applied_at', 'name', 'email', 'role_title', 'vertical', 'site_name', 'assigned_rep', 'source_tag', 'heard_from', 'stage', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url']);
-  assert.equal(rows.length - 1, count(t.db, 'applications'));
+  assert.equal(rows.length - 1, await count(t.db, 'applications'));
   assert.ok(rows.every((r) => r.length === 15));
   const r1 = rows.find((r) => r[0] === String(a1));
   assert.equal(r1[1], '2026-03-09 23:30'); // America/New_York
@@ -215,12 +218,12 @@ test('AC-32: CSV export columns, one row per application, date filter, formula-i
 });
 
 test('AC-33: deleting a candidate removes person, applications, events, notes, emails, files; logs one deletion', async () => {
-  const roleA = makeRole(t.db, { title: 'Delete A' });
-  const roleB = makeRole(t.db, { title: 'Delete B' });
+  const roleA = await makeRole(t.db, { title: 'Delete A' });
+  const roleB = await makeRole(t.db, { title: 'Delete B' });
   await t.client().apply(roleA, { email: 'forget.me@example.com', name: 'Forget Me' }, { file: { name: 'cv.pdf', data: pdf(3000) } });
-  const a1 = lastApplication(t.db);
+  const a1 = await lastApplication(t.db);
   await t.client().apply(roleB, { email: 'forget.me@example.com', name: 'Forget Me' }, { file: { name: 'cv2.pdf', data: pdf(3000) } });
-  const a2 = lastApplication(t.db);
+  const a2 = await lastApplication(t.db);
   const files = [a1.file_path, a2.file_path].map((f) => path.join(t.dataDir, f));
   files.forEach((f) => assert.ok(fs.existsSync(f)));
   await admin.get(`/app/applications/${a1.id}`);
@@ -228,23 +231,23 @@ test('AC-33: deleting a candidate removes person, applications, events, notes, e
   await admin.post(`/app/applications/${a2.id}/stage`, { stage: 'reviewing' });
   await admin.post(`/app/applications/${a2.id}/email`, { subject: 'Hi', body: 'There' });
   const personId = a1.person_id;
-  const keep = count(t.db, 'applications') - 2;
+  const keep = await count(t.db, 'applications') - 2;
 
   const confirm = await admin.get(`/app/people/${personId}/delete?from=${a1.id}`);
   assert.equal(confirm.status, 200);
   assert.match(confirm.text, /This permanently deletes/);
-  assert.equal(count(t.db, 'people', 'id = ?', personId), 1); // GET alone deletes nothing
+  assert.equal(await count(t.db, 'people', 'id = ?', personId), 1); // GET alone deletes nothing
 
   const res = await admin.post(`/app/people/${personId}/delete`, {});
   assert.equal(res.status, 303);
-  assert.equal(count(t.db, 'people', 'id = ?', personId), 0);
-  assert.equal(count(t.db, 'applications', 'person_id = ?', personId), 0);
-  assert.equal(count(t.db, 'application_events', 'application_id IN (?, ?)', a1.id, a2.id), 0);
-  assert.equal(count(t.db, 'notes', 'person_id = ?', personId), 0);
-  assert.equal(count(t.db, 'emails_sent', 'person_id = ?', personId), 0);
+  assert.equal(await count(t.db, 'people', 'id = ?', personId), 0);
+  assert.equal(await count(t.db, 'applications', 'person_id = ?', personId), 0);
+  assert.equal(await count(t.db, 'application_events', 'application_id IN (?, ?)', a1.id, a2.id), 0);
+  assert.equal(await count(t.db, 'notes', 'person_id = ?', personId), 0);
+  assert.equal(await count(t.db, 'emails_sent', 'person_id = ?', personId), 0);
   files.forEach((f) => assert.ok(!fs.existsSync(f)));
-  assert.equal(count(t.db, 'applications'), keep);
-  const log = t.db.prepare('SELECT * FROM deletion_log').all();
+  assert.equal(await count(t.db, 'applications'), keep);
+  const log = await t.db.all('SELECT * FROM deletion_log');
   assert.equal(log.length, 1);
   assert.equal(log[0].deleted_person_id, personId);
   assert.deepEqual(Object.keys(log[0]).sort(), ['actor_user_id', 'at', 'deleted_person_id', 'id']);
@@ -255,8 +258,8 @@ test('AC-34: user-entered <script> is escaped on every page', async () => {
   const x = '<script>alert(1)</script>';
   // Admin-entered role and template content
   await admin.get('/app/admin/roles/new');
-  await admin.post('/app/admin/roles', { title: `Role ${x}`, vertical: `V ${x}`, site_name: `S ${x}`, description: `D ${x}`, status: 'open', q_text_0: `Q ${x}`, assigned_user_id: String(t.db.prepare("SELECT id FROM users WHERE email = 'admin@fansided.com'").get().id) });
-  const role = t.db.prepare("SELECT id FROM job_roles WHERE title LIKE 'Role <script>%'").get().id;
+  await admin.post('/app/admin/roles', { title: `Role ${x}`, vertical: `V ${x}`, site_name: `S ${x}`, description: `D ${x}`, status: 'open', q_text_0: `Q ${x}`, assigned_user_id: String((await t.db.get("SELECT id FROM users WHERE email = 'admin@fansided.com'")).id) });
+  const role = (await t.db.get("SELECT id FROM job_roles WHERE title LIKE 'Role <script>%'")).id;
   await admin.get('/app/admin/templates/new');
   await admin.post('/app/admin/templates', { name: `T ${x}`, subject: `Subj ${x}`, body: `Body ${x} {{${'"><script>'}}}` });
   await admin.get('/app/admin/users');
@@ -265,13 +268,13 @@ test('AC-34: user-entered <script> is escaped on every page', async () => {
   // Applicant-entered content
   const c = t.client();
   await c.apply(role, { name: `N ${x}`, email: 'xss@example.com', sample_links: `https://example.com/?q=${x}`, answer_0: `A ${x}`, source: x });
-  const app = lastApplication(t.db);
+  const app = await lastApplication(t.db);
   assert.ok(app, 'application saved');
   assert.match(app.source_tag, /<script>/);
   await admin.get(`/app/applications/${app.id}`);
   await admin.post(`/app/applications/${app.id}/notes`, { body: `Note ${x}` });
   await admin.post(`/app/applications/${app.id}/email`, { subject: `Mail ${x}`, body: `Mail body ${x}` });
-  const tpl = t.db.prepare("SELECT id FROM email_templates WHERE name LIKE 'T <script>%'").get().id;
+  const tpl = (await t.db.get("SELECT id FROM email_templates WHERE name LIKE 'T <script>%'")).id;
 
   // Bad URL schemes are never links
   const bad = await t.client().apply(role, { email: 'js@example.com', sample_links: 'javascript:alert(1)', linkedin_url: 'javascript:alert(1)' });
@@ -307,28 +310,32 @@ test('AC-34: user-entered <script> is escaped on every page', async () => {
 });
 
 test('AC-35: data and uploads survive a restart and migrations do not re-run', async () => {
-  const dir = t.dataDir;
-  const role = makeRole(t.db, { title: 'Persistent Role' });
+  const role = await makeRole(t.db, { title: 'Persistent Role' });
   await t.client().apply(role, { email: 'persist@example.com', name: 'Per Sist' }, { file: { name: 'keep.pdf', data: pdf(4096) } });
-  const app = lastApplication(t.db);
-  // Remove one seeded template: if migration 2 re-ran, it would come back.
-  t.db.prepare("DELETE FROM email_templates WHERE name = 'Welcome aboard'").run();
-  const templates = count(t.db, 'email_templates');
-  const version = t.db.prepare('PRAGMA user_version').get().user_version;
-  assert.equal(version, require('../src/lib/db').MIGRATIONS.length);
-  const totals = ['users', 'people', 'applications', 'application_events', 'notes', 'emails_sent', 'job_roles'].map((tb) => count(t.db, tb));
+  const app = await lastApplication(t.db);
+  // Remove one seeded template: if the seed migration re-ran, it would come back.
+  await t.db.run("DELETE FROM email_templates WHERE name = 'Welcome aboard'");
+  const templates = await count(t.db, 'email_templates');
+  const version = (await t.db.get('SELECT MAX(version) AS v FROM schema_migrations')).v;
+  assert.equal(version, MIGRATIONS.length);
+  const tables = ['users', 'people', 'applications', 'application_events', 'notes', 'emails_sent', 'job_roles'];
+  const totals = [];
+  for (const tb of tables) totals.push(await count(t.db, tb));
 
-  await t.close({ keepData: true });
-  t = await startApp({ dataDir: dir });
+  t = await t.restart();
   admin = t.client();
   await admin.login('admin@fansided.com');
 
-  assert.equal(t.db.prepare('PRAGMA user_version').get().user_version, version);
-  assert.equal(count(t.db, 'email_templates'), templates);
-  assert.equal(count(t.db, 'email_templates', "name = 'Welcome aboard'"), 0);
-  assert.deepEqual(['users', 'people', 'applications', 'application_events', 'notes', 'emails_sent', 'job_roles'].map((tb) => count(t.db, tb)), totals);
+  assert.equal((await t.db.get('SELECT MAX(version) AS v FROM schema_migrations')).v, version);
+  assert.equal(await count(t.db, 'schema_migrations'), MIGRATIONS.length);
+  assert.equal(await count(t.db, 'email_templates'), templates);
+  assert.equal(await count(t.db, 'email_templates', "name = 'Welcome aboard'"), 0);
+  const after = [];
+  for (const tb of tables) after.push(await count(t.db, tb));
+  assert.deepEqual(after, totals);
   const file = await admin.get(`/app/applications/${app.id}/file`);
   assert.equal(file.status, 200);
   assert.equal(file.buffer.length, 4096);
   assert.match((await admin.get(`/app/applications/${app.id}`)).text, /Per Sist/);
+});
 });

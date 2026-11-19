@@ -11,10 +11,10 @@ const { SCOPES } = require('../lib/google');
 const STATE_COOKIE = 'oauth_state';
 const NOT_AUTHORISED = "Your account isn't authorised. Ask an admin.";
 
-function loginPage(ctx, { error, status = 200 } = {}) {
+async function loginPage(ctx, { error, status = 200 } = {}) {
   const { config, google, db } = ctx.app;
   const next = safeNext(ctx.query.get('next'));
-  const devUsers = config.devLogin ? db.prepare('SELECT email, name, role FROM users WHERE active = 1 ORDER BY role, email').all() : [];
+  const devUsers = config.devLogin ? await db.all('SELECT email, name, role FROM users WHERE active = 1 ORDER BY role, email') : [];
   page(ctx, {
     title: 'Sign in',
     status,
@@ -77,14 +77,14 @@ async function googleCallback(ctx) {
     return loginPage(ctx, { error: 'Google sign-in failed. Please try again.', status: 502 });
   }
 
-  const { user, reason } = checkAllowed(db, config, info);
+  const { user, reason } = await checkAllowed(db, config, info);
   if (!user) {
     log(`[auth] refused a Google sign-in: ${reason}`);
     return loginPage(ctx, { error: NOT_AUTHORISED, status: 403 });
   }
 
   if (tokens.refresh_token) {
-    db.prepare('UPDATE users SET google_refresh_token_enc = ? WHERE id = ?').run(encrypt(tokens.refresh_token, config.tokenKey), user.id);
+    await db.run('UPDATE users SET google_refresh_token_enc = ? WHERE id = ?', [encrypt(tokens.refresh_token, config.tokenKey), user.id]);
   } else {
     let usable = false;
     if (user.google_refresh_token_enc) {
@@ -99,9 +99,9 @@ async function googleCallback(ctx) {
     if (!usable && !saved.c) return startGoogle(ctx, { forceConsent: true, next: saved.n });
   }
 
-  if (!user.name && info.name) db.prepare('UPDATE users SET name = ? WHERE id = ?').run(String(info.name).slice(0, 200), user.id);
+  if (!user.name && info.name) await db.run('UPDATE users SET name = ? WHERE id = ?', [String(info.name).slice(0, 200), user.id]);
 
-  createSession(ctx, user.id);
+  await createSession(ctx, user.id);
   const granted = String(tokens.scope || '').split(/\s+/);
   if (tokens.scope && !granted.includes(SCOPES[3])) {
     setFlash(ctx, 'error', 'Gmail permission was not granted, so you cannot send email. Sign out and in again and allow "Send email on your behalf".');
@@ -114,18 +114,18 @@ async function devLogin(ctx) {
   if (!config.devLogin || config.production) return ctx.send(404, 'Not found');
   const form = await readForm(ctx.req, 64 * 1024);
   verifyPublic(ctx, form);
-  const { user } = checkAllowed(db, config, { email: form.get('email'), email_verified: true });
+  const { user } = await checkAllowed(db, config, { email: form.get('email'), email_verified: true });
   if (!user) return loginPage(ctx, { error: NOT_AUTHORISED, status: 403 });
-  createSession(ctx, user.id);
+  await createSession(ctx, user.id);
   ctx.redirect(safeNext(form.get('next')));
 }
 
 function register(router) {
-  router.get('/login', (ctx) => {
+  router.get('/login', async (ctx) => {
     if (ctx.user) return ctx.redirect(safeNext(ctx.query.get('next')));
-    loginPage(ctx);
+    await loginPage(ctx);
   });
-  router.get('/auth/google', (ctx) => {
+  router.get('/auth/google', async (ctx) => {
     if (!ctx.app.google.configured) return loginPage(ctx, { error: 'Google sign-in is not configured.', status: 503 });
     startGoogle(ctx);
   });
@@ -134,7 +134,7 @@ function register(router) {
   router.post('/logout', async (ctx) => {
     if (!ctx.user) return ctx.redirect('/login');
     await internalForm(ctx);
-    destroySession(ctx);
+    await destroySession(ctx);
     ctx.redirect('/login');
   });
 }

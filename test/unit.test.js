@@ -11,7 +11,8 @@ const { applyMergeFields, firstName, buildRfc2822 } = require('../src/lib/email'
 const { parseCookies, serializeCookie } = require('../src/lib/cookies');
 const { loadConfig } = require('../src/lib/config');
 const { createGoogle } = require('../src/lib/google');
-const { createRateLimiter } = require('../src/routes/public');
+const { rateKey, allowed, record, RETENTION_MS } = require('../src/lib/ratelimit');
+const { freshDb } = require('./helpers');
 const voltax = require('../src/voltax');
 
 test('html escapes interpolations by default, including nested arrays', () => {
@@ -139,17 +140,31 @@ test('config: production requires secrets and refuses DEV_LOGIN', () => {
   assert.equal(c.timezone, 'America/New_York');
 });
 
-test('rate limiter: 10 recorded submissions per hour per key; checking does not record', () => {
-  const rl = createRateLimiter();
-  const now = 1_000_000;
-  for (let i = 0; i < 50; i++) assert.ok(rl.allowed('ip', now)); // checks alone never use up the limit
-  for (let i = 0; i < 10; i++) {
-    assert.ok(rl.allowed('ip', now + i));
-    rl.record('ip', now + i);
+test('rate limiter (database): 10 recorded hits per window per key; checking does not record', async () => {
+  const f = await freshDb('sqlite');
+  try {
+    const key = rateKey('s3cret', 'apply', '203.0.113.9');
+    assert.match(key, /^[0-9a-f]{64}$/);
+    assert.notEqual(key, rateKey('other-secret', 'apply', '203.0.113.9'));
+    assert.notEqual(key, rateKey('s3cret', 'login', '203.0.113.9'));
+    for (let i = 0; i < 50; i++) assert.ok(await allowed(f.db, key, 10, 3600000)); // checks alone never use up the limit
+    for (let i = 0; i < 10; i++) {
+      assert.ok(await allowed(f.db, key, 10, 3600000));
+      await record(f.db, key);
+    }
+    assert.ok(!(await allowed(f.db, key, 10, 3600000)));
+    assert.ok(await allowed(f.db, rateKey('s3cret', 'apply', 'other'), 10, 3600000));
+    // The window moves on: hits from an hour and a bit ago no longer count, and old rows are pruned.
+    await f.db.run('UPDATE rate_limits SET at = ?', [new Date(Date.now() - 3600000 - 5000).toISOString()]);
+    assert.ok(await allowed(f.db, key, 10, 3600000));
+    await f.db.run('UPDATE rate_limits SET at = ?', [new Date(Date.now() - RETENTION_MS - 5000).toISOString()]);
+    await record(f.db, key);
+    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 1);
+    // Neither the raw key value nor the secret is stored.
+    assert.doesNotMatch(JSON.stringify(await f.db.all('SELECT * FROM rate_limits')), /203\.0\.113|s3cret/);
+  } finally {
+    await f.close();
   }
-  assert.ok(!rl.allowed('ip', now + 11));
-  assert.ok(rl.allowed('other', now));
-  assert.ok(rl.allowed('ip', now + 60 * 60 * 1000 + 20)); // window has moved on
 });
 
 test('voltax.createUser is a stub that returns not_configured', async () => {
