@@ -160,7 +160,7 @@ async function candidatePage(ctx) {
             <input type="hidden" name="from_stage" value="${app.stage}">
             <div class="field">
               <label for="f-stage">Stage</label>
-              <select name="stage" id="f-stage">${STAGES.map((st) => html`<option value="${st}"${st === app.stage ? raw(' selected') : ''}>${STAGE_LABELS[st]}</option>`)}</select>
+              <select name="stage" id="f-stage" required><option value="">Move to…</option>${STAGES.filter((st) => st !== app.stage).map((st) => html`<option value="${st}">${STAGE_LABELS[st]}</option>`)}</select>
             </div>
             ${app.stage === 'onboarded'
               ? ''
