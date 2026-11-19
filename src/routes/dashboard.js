@@ -10,7 +10,7 @@ const { toCsv } = require('../lib/csv');
 const { formatDateTime, zonedMidnightUtc, isValidYmd, todayIn, daysSince } = require('../lib/time');
 
 function idParam(value) {
-  if (!/^\d+$/.test(String(value))) throw new HttpError(404, 'Not found');
+  if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw new HttpError(404, 'Not found');
   return Number(value);
 }
 
@@ -35,6 +35,17 @@ async function dashboard(ctx) {
     if (!counts.has(row.role_id)) counts.set(row.role_id, {});
     counts.get(row.role_id)[row.stage] = row.n;
   }
+  // "+N since your last visit": applications that arrived after the previous dashboard view, computed from the
+  // stored stamp (nothing in memory) BEFORE the stamp is moved forward. Before a user's first visit there is no
+  // previous view, so nothing is shown.
+  const now = nowIso();
+  const since = new Map();
+  if (ctx.user.dashboard_seen_at) {
+    for (const row of await db.all('SELECT role_id, COUNT(*) AS n FROM applications WHERE applied_at > ? GROUP BY role_id', [ctx.user.dashboard_seen_at])) {
+      since.set(row.role_id, row.n);
+    }
+  }
+  await db.run('UPDATE users SET dashboard_seen_at = ? WHERE id = ?', [now, ctx.user.id]);
   page(ctx, {
     title: 'Dashboard',
     body: html`<h1>${showAll ? 'All roles' : 'My roles'}</h1>
@@ -55,7 +66,7 @@ async function dashboard(ctx) {
                 <td><span class="status status-${r.status}">${r.status}</span></td>
                 <td>${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</td>
                 ${STAGES.map(
-                  (s) => html`<td class="num${s === 'new' && c.new ? ' highlight' : ''}" data-stage="${s}">${c[s] || 0}</td>`
+                  (s) => html`<td class="num${s === 'new' && c.new ? ' highlight' : ''}" data-stage="${s}">${c[s] || 0}${s === 'new' && since.get(r.id) ? html` <span class="since" data-since="${since.get(r.id)}">+${since.get(r.id)} since your last visit</span>` : ''}</td>`
                 )}
               </tr>`;
             })}

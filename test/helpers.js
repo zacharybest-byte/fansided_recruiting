@@ -1,12 +1,34 @@
 'use strict';
 // Test helpers: start the app on a random port with a temp DATA_DIR, and a cookie-keeping HTTP client.
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createApp } = require('../src/app');
 const { createHttpServer } = require('../src/server');
 const { nowIso, openDb, migrate } = require('../src/lib/db');
+const { hashPassword } = require('../src/lib/password');
 const { startFakeTurso } = require('./fake-turso');
+
+// scrypt is deliberately slow (about 85 ms at N=32768), so the shared test password is hashed ONCE per process
+// and the hash string is reused for every test user. To keep the suite quick that one string uses a cheap cost
+// (N=1024): the login form still runs a real scrypt verify, which reads the parameters from the stored string.
+// Hashes made by the app itself (setup, set-password, account) always use the production parameters.
+// FSR_REAL_SCRYPT=1 makes the shared hash use the production parameters too (slower, full-cost run).
+const TEST_PASSWORD = 'correct horse battery staple';
+const SESSION_SECRET = 'test-session-secret-0123456789abcdef-0123456789';
+let testHash = null;
+function testPasswordHash() {
+  if (!testHash) {
+    if (process.env.FSR_REAL_SCRYPT === '1') testHash = hashPassword(TEST_PASSWORD);
+    else {
+      const salt = crypto.randomBytes(16);
+      const key = crypto.scryptSync(TEST_PASSWORD, salt, 32, { N: 1024, r: 8, p: 1 });
+      testHash = Promise.resolve(`scrypt$1024$8$1$${salt.toString('base64')}$${key.toString('base64')}`);
+    }
+  }
+  return testHash;
+}
 
 let ipCounter = 1;
 
@@ -16,7 +38,7 @@ const DRIVERS = ['sqlite', 'turso'];
 
 // Starts the app on a random port. `driver` is 'sqlite' or 'turso'. For restarts pass the same
 // `dataDir` (and `fake`, for turso), or use `t.restart()`.
-async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl, log, ownFake: ownFakeOpt } = {}) {
+async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl, log, ownFake: ownFakeOpt, admin = true, trustedIpHeader = 'x-forwarded-for' } = {}) {
   const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'fsr-test-'));
   const ownFake = ownFakeOpt ?? (driver === 'turso' && !fake);
   const theFake = driver === 'turso' ? fake || (await startFakeTurso()) : null;
@@ -24,21 +46,21 @@ async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl,
   const instance = createApp({
     env: {
       NODE_ENV: 'test',
-      DATA_DIR: dir,
-      DEV_LOGIN: '1',
-      EMAIL_MODE: 'log',
-      TRUST_PROXY: '1',
-      QUIET: '1',
-      ADMIN_EMAILS: 'admin@fansided.com',
-      TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
+      SESSION_SECRET,
       BASE_URL: 'http://localhost',
       ...dbEnv,
       ...env,
     },
+    dataDir: dir,
     fetchImpl,
+    trustedIpHeader,
     log: log || (() => {}),
   });
   await instance.ready;
+  // A signed-in admin to work with (idempotent, so restarts on the same database keep it).
+  if (admin && !(await instance.db.get("SELECT id FROM users WHERE email = 'admin@fansided.com'"))) {
+    await makeUser(instance.db, { email: 'admin@fansided.com', name: '', role: 'admin' });
+  }
   const server = createHttpServer(instance.handler);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -63,7 +85,7 @@ async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl,
     // Tears the whole app down (server, app instance, caches) and builds a new one on the same database.
     async restart(opts = {}) {
       await t.close({ keepData: true });
-      return startApp({ driver, env, dataDir: dir, fake: theFake, fetchImpl, log, ownFake, ...opts });
+      return startApp({ driver, env, dataDir: dir, fake: theFake, fetchImpl, log, ownFake, admin, trustedIpHeader, ...opts });
     },
   };
   return t;
@@ -137,7 +159,7 @@ class Client {
   }
 
   csrf(htmlText = this.lastHtml) {
-    const m = /name="csrf" value="([0-9a-f]*)"/.exec(htmlText);
+    const m = /name="csrf" value="([0-9a-f.]*)"/.exec(htmlText);
     return m ? m[1] : '';
   }
 
@@ -153,18 +175,19 @@ class Client {
     return this.request('POST', url, { body: params, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
   }
 
-  async login(email) {
+  // Signs in through the real login form. Returns the POST /login response.
+  async login(email, password = TEST_PASSWORD, next = '/app') {
     await this.get('/login');
-    const res = await this.post('/auth/dev', { email, next: '/app' });
-    if (res.status === 303) await this.get('/app');
+    const res = await this.post('/login', { email, password, next });
+    if (res.status === 303) await this.get(res.headers.get('location'));
     return res;
   }
 
-  // Loads the role page (for the double-submit token) then submits a multipart application.
-  async apply(roleId, fields = {}, { file, query = '' } = {}) {
+  // Loads the role page (for the double-submit token) then submits an application form.
+  async apply(roleId, fields = {}, { query = '' } = {}) {
     await this.get(`/roles/${roleId}${query}`);
-    const fd = new FormData();
-    fd.append('csrf', this.csrf());
+    const params = new URLSearchParams();
+    params.append('csrf', this.csrf());
     const defaults = { name: 'Test Person', email: `person${Date.now()}${Math.random()}@example.com`, sample_links: 'https://example.com/post', heard_from: 'LinkedIn' };
     const all = { ...defaults, ...fields };
     if (!('source' in fields)) {
@@ -175,14 +198,17 @@ class Client {
       const m = /name="qv" value="([0-9a-f]*)"/.exec(this.lastHtml);
       all.qv = m ? m[1] : '';
     }
-    for (const [k, v] of Object.entries(all)) if (v !== undefined) fd.append(k, v);
-    if (file) fd.append('file', new Blob([file.data]), file.name);
-    return this.request('POST', `/roles/${roleId}/apply`, { body: fd });
+    for (const [k, v] of Object.entries(all)) if (v !== undefined) params.append(k, v);
+    return this.request('POST', `/roles/${roleId}/apply`, { body: params, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
   }
 }
 
-async function makeUser(db, { email, name = email.split('@')[0], role = 'rep', active = 1 }) {
-  const r = await db.run('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, ?, ?)', [email, name, role, active, nowIso()]);
+// `password`: a string is hashed (the shared test password reuses one precomputed hash); null = invite pending.
+async function makeUser(db, { email, name = email.split('@')[0], role = 'rep', active = 1, password = TEST_PASSWORD }) {
+  const hash = password === null ? null : password === TEST_PASSWORD ? await testPasswordHash() : await hashPassword(password);
+  const r = await db.run('INSERT INTO users (email, name, role, active, password_hash, password_changed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+    email, name, role, active, hash, hash ? nowIso() : null, nowIso(),
+  ]);
   return r.lastInsertRowid;
 }
 
@@ -203,10 +229,4 @@ async function count(db, table, where = '1=1', ...args) {
   return (await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, args)).n;
 }
 
-const pdf = (bytes = 2000) => {
-  const b = Buffer.alloc(bytes, 0x20);
-  b.write('%PDF-1.4\n');
-  return b;
-};
-
-module.exports = { DRIVERS, startApp, freshDb, Client, makeUser, makeRole, lastApplication, count, pdf };
+module.exports = { DRIVERS, TEST_PASSWORD, SESSION_SECRET, startApp, freshDb, Client, makeUser, makeRole, lastApplication, count };

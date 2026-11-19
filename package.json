@@ -4,12 +4,13 @@
   "private": true,
   "description": "FanSided's in-house contributor recruiting tool (v1).",
   "main": "src/server.js",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/server.js",
-    "dev": "DEV_LOGIN=1 EMAIL_MODE=log node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test",
-    "seed": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/seed.js"
+    "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
   },
   "license": "UNLICENSED"
 }

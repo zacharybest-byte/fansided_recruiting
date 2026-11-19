@@ -36,7 +36,7 @@ function page(ctx, { title, body, status = 200 }) {
           ? html`<a href="/app/admin/roles">Roles</a><a href="/app/admin/templates">Templates</a><a href="/app/admin/users">Users</a>`
           : ''}
         <span class="spacer"></span>
-        <span class="muted">${user.name || user.email}${user.role === 'admin' ? ' (admin)' : ''}</span>
+        <a href="/app/account">${user.name || user.email}${user.role === 'admin' ? ' (admin)' : ''}</a>
         <form method="post" action="/logout" class="inline">
           <input type="hidden" name="csrf" value="${ctx.session.csrfToken}">
           <button type="submit" class="link">Sign out</button>

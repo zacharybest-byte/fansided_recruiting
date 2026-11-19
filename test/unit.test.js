@@ -4,13 +4,14 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { html, raw, link, escapeHtml } = require('../src/lib/render');
 const { csvCell, toCsv } = require('../src/lib/csv');
-const { parseMultipart } = require('../src/lib/multipart');
-const { encrypt, decrypt, safeEqual } = require('../src/lib/crypto');
+const { safeEqual, randomToken, sha256Hex, hmacHex } = require('../src/lib/crypto');
+const { hashPassword, verifyPassword, validatePassword, dummyHash } = require('../src/lib/password');
 const { formatDateTime, zonedMidnightUtc, isValidYmd } = require('../src/lib/time');
-const { applyMergeFields, firstName, buildRfc2822 } = require('../src/lib/email');
+const { applyMergeFields, firstName } = require('../src/lib/email');
 const { parseCookies, serializeCookie } = require('../src/lib/cookies');
-const { loadConfig } = require('../src/lib/config');
-const { createGoogle } = require('../src/lib/google');
+const { loadConfig, resolveBaseUrl, ConfigError } = require('../src/lib/config');
+const { notifyNewApplication } = require('../src/lib/notify');
+const { reserve, release } = require('../src/lib/ratelimit');
 const { rateKey, allowed, record, RETENTION_MS } = require('../src/lib/ratelimit');
 const { freshDb } = require('./helpers');
 const voltax = require('../src/voltax');
@@ -23,10 +24,13 @@ test('html escapes interpolations by default, including nested arrays', () => {
   assert.equal(escapeHtml('`'), '`');
 });
 
-test('link() only links http(s) URLs', () => {
-  assert.match(String(link('https://example.com/a?b=<c>')), /^<a href="https:\/\/example.com\/a\?b=&lt;c&gt;" rel="noopener noreferrer nofollow"/);
+test('link() only links https URLs and always sets rel="noopener noreferrer"', () => {
+  assert.match(String(link('https://example.com/a?b=<c>')), /^<a href="https:\/\/example.com\/a\?b=&lt;c&gt;" rel="noopener noreferrer" target="_blank">/);
+  assert.equal(String(link('http://example.com/insecure')), 'http://example.com/insecure');
   assert.equal(String(link('javascript:alert(1)')), 'javascript:alert(1)');
   assert.equal(String(link('data:text/html,<x>')), 'data:text/html,&lt;x&gt;');
+  assert.equal(String(link('not a url')), 'not a url');
+  assert.equal(String(link('')), '');
 });
 
 test('CSV quoting (RFC 4180) and formula-injection guard', () => {
@@ -39,45 +43,6 @@ test('CSV quoting (RFC 4180) and formula-injection guard', () => {
   assert.equal(csvCell(null), '');
   assert.equal(csvCell(42), '42');
   assert.equal(toCsv(['a', 'b'], [[1, 'é']]), 'a,b\r\n1,é\r\n');
-});
-
-test('multipart parser handles fields, repeated fields, binary files and odd filenames', () => {
-  const boundary = '----x1234';
-  const bin = Buffer.from([0, 1, 2, 0x0d, 0x0a, 0x2d, 0x2d, 255, 254]); // includes CRLF--
-  const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="name"\r\n\r\nJosé Ñ\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="tag"\r\n\r\na\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="tag"\r\n\r\nb\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="my \\"cv\\".pdf"\r\nContent-Type: application/pdf\r\n\r\n`),
-    bin,
-    Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="empty"; filename=""\r\n\r\n\r\n`),
-    Buffer.from(`--${boundary}--\r\n`),
-  ]);
-  const { fields, files } = parseMultipart(body, `multipart/form-data; boundary=${boundary}`);
-  assert.deepEqual(fields.get('name'), ['José Ñ']);
-  assert.deepEqual(fields.get('tag'), ['a', 'b']);
-  assert.equal(files.length, 2);
-  assert.equal(files[0].filename, 'my "cv".pdf');
-  assert.equal(files[0].contentType, 'application/pdf');
-  assert.ok(files[0].data.equals(bin));
-  assert.equal(files[1].filename, '');
-  assert.throws(() => parseMultipart(Buffer.from('garbage'), 'multipart/form-data; boundary=zz'));
-  assert.throws(() => parseMultipart(body, 'multipart/form-data'));
-});
-
-test('AES-256-GCM token encryption round-trips and detects tampering', () => {
-  const key = crypto.randomBytes(32);
-  const enc = encrypt('1//refresh-token', key);
-  assert.match(enc, /^v1:/);
-  assert.notEqual(encrypt('1//refresh-token', key), enc); // random IV
-  assert.equal(decrypt(enc, key), '1//refresh-token');
-  assert.throws(() => decrypt(enc, crypto.randomBytes(32)));
-  const buf = Buffer.from(enc.slice(3), 'base64');
-  buf[buf.length - 1] ^= 1;
-  assert.throws(() => decrypt(`v1:${buf.toString('base64')}`, key));
-  assert.ok(safeEqual('abc', 'abc'));
-  assert.ok(!safeEqual('abc', 'abd'));
-  assert.ok(!safeEqual('', ''));
 });
 
 test('time zone helpers', () => {
@@ -100,44 +65,117 @@ test('merge fields', () => {
   assert.equal(firstName(''), '');
 });
 
-test('RFC 2822 message: CRLF, encoded UTF-8 subject, base64 body, no header injection', () => {
-  const msg = buildRfc2822({ fromName: 'Rïley Rep', fromEmail: 'r@fansided.com', to: 'x@example.com\r\nBcc: evil@example.com', subject: 'Hé\r\nBcc: evil@example.com', body: 'Line 1\nLine 2' });
-  const [head, body] = msg.split('\r\n\r\n');
-  const lines = head.split('\r\n');
-  assert.ok(!lines.some((l) => /^Bcc:/i.test(l)));
-  assert.match(lines[0], /^From: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?= <r@fansided.com>$/);
-  const subj = lines.find((l) => l.startsWith('Subject: ')).slice(9);
-  assert.equal(Buffer.from(/=\?UTF-8\?B\?(.*)\?=/.exec(subj)[1], 'base64').toString(), 'Hé Bcc: evil@example.com');
-  assert.ok(lines.includes('Content-Type: text/plain; charset="UTF-8"'));
-  assert.ok(lines.includes('Content-Transfer-Encoding: base64'));
-  assert.equal(Buffer.from(body.replace(/\r\n/g, ''), 'base64').toString(), 'Line 1\r\nLine 2');
-});
-
-test('Google authorization URL and prompt=consent', () => {
-  const g = createGoogle({ clientId: 'cid', clientSecret: 's', redirectUri: 'https://r.example.com/cb' });
-  const u = new URL(g.authorizationUrl({ state: 'st' }));
-  assert.equal(u.searchParams.get('client_id'), 'cid');
-  assert.equal(u.searchParams.get('prompt'), null);
-  assert.equal(new URL(g.authorizationUrl({ state: 'st', forceConsent: true })).searchParams.get('prompt'), 'consent');
-});
-
 test('cookies parse and serialise with secure defaults', () => {
   assert.deepEqual(parseCookies('a=1; b=hello%20world; a=2; bad'), { a: '1', b: 'hello world' });
   const s = serializeCookie('sid', 'abc', { maxAge: 60 });
   assert.match(s, /^sid=abc; Max-Age=60; Expires=.*; Path=\/; HttpOnly; Secure; SameSite=Lax$/);
 });
 
-test('config: production requires secrets and refuses DEV_LOGIN', () => {
-  assert.throws(() => loadConfig({ NODE_ENV: 'production' }), /TOKEN_ENCRYPTION_KEY/);
-  const key = Buffer.alloc(32, 1).toString('base64');
-  assert.throws(() => loadConfig({ NODE_ENV: 'production', TOKEN_ENCRYPTION_KEY: key }), /GOOGLE_CLIENT_ID/);
-  assert.throws(() => loadConfig({ NODE_ENV: 'production', DEV_LOGIN: '1', TOKEN_ENCRYPTION_KEY: key }), /DEV_LOGIN/);
-  assert.throws(() => loadConfig({ TOKEN_ENCRYPTION_KEY: 'c2hvcnQ=' }), /32 bytes/);
-  assert.throws(() => loadConfig({ APP_TIMEZONE: 'Mars/Base' }), /time zone/);
-  const c = loadConfig({ ALLOWED_EMAIL_DOMAINS: 'FanSided.com, minutemedia.com', MAX_UPLOAD_MB: '10' });
-  assert.deepEqual(c.allowedEmailDomains, ['fansided.com', 'minutemedia.com']);
-  assert.equal(c.maxBodyBytes, 11 * 1024 * 1024);
-  assert.equal(c.timezone, 'America/New_York');
+test('config: reads exactly the documented variables; production rules; webhook and base URL', () => {
+  assert.throws(() => loadConfig({ NODE_ENV: 'production' }), (e) => e instanceof ConfigError && e.missing.join() === 'SESSION_SECRET,TURSO_DATABASE_URL,TURSO_AUTH_TOKEN');
+  assert.throws(() => loadConfig({ TURSO_DATABASE_URL: 'libsql://x.turso.io' }), (e) => e.missing.join() === 'TURSO_AUTH_TOKEN');
+  const dev = loadConfig({});
+  assert.equal(dev.production, false);
+  assert.equal(dev.timezone, 'America/New_York');
+  assert.equal(dev.port, 3000);
+  assert.ok(dev.warnings.some((w) => /SESSION_SECRET/.test(w)));
+  // Removed variables are ignored, not read.
+  const ignored = loadConfig({ DEV_LOGIN: '1', EMAIL_MODE: 'gmail', APP_TIMEZONE: 'Mars/Base', GOOGLE_CLIENT_ID: 'x', TOKEN_ENCRYPTION_KEY: 'bad', ADMIN_EMAILS: 'a@b.c', ALLOWED_EMAIL_DOMAINS: 'x.com', DATA_DIR: '/nonexistent', MAX_UPLOAD_MB: '-1', TRUST_PROXY: '3', QUIET: '1' });
+  assert.equal(ignored.timezone, 'America/New_York');
+  assert.notEqual(ignored.dataDir, '/nonexistent');
+  assert.equal(ignored.adminEmail, '');
+  // setup variables
+  assert.equal(loadConfig({ ADMIN_EMAIL: ' Boss@FanSided.com ', SETUP_TOKEN: 'x'.repeat(20) }).adminEmail, 'boss@fansided.com');
+  const short = loadConfig({ ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: 'x'.repeat(19) });
+  assert.equal(short.setupToken, '');
+  assert.ok(short.warnings.some((w) => /SETUP_TOKEN/.test(w)));
+  // webhook must be https
+  assert.equal(loadConfig({ NOTIFY_WEBHOOK_URL: 'https://hooks.example.com/x?k=v' }).webhookUrl, 'https://hooks.example.com/x?k=v');
+  for (const bad of ['http://hooks.example.com/x', 'ftp://x', 'nonsense', 'javascript:alert(1)']) {
+    const c = loadConfig({ NOTIFY_WEBHOOK_URL: bad });
+    assert.equal(c.webhookUrl, '');
+    assert.ok(c.warnings.some((w) => /NOTIFY_WEBHOOK_URL/.test(w)));
+    assert.ok(!c.warnings.join().includes(bad), 'the URL itself is not logged');
+  }
+  // base URL: BASE_URL, else VERCEL_PROJECT_PRODUCTION_URL, else VERCEL_URL, else the request host (not in production)
+  const prod = { NODE_ENV: 'production', SESSION_SECRET: 'x'.repeat(32), TURSO_DATABASE_URL: 'libsql://a.turso.io', TURSO_AUTH_TOKEN: 't' };
+  assert.equal(loadConfig({ ...prod, BASE_URL: 'https://recruit.example.com/', VERCEL_URL: 'v.vercel.app' }).baseUrl, 'https://recruit.example.com');
+  assert.equal(loadConfig({ ...prod, VERCEL_PROJECT_PRODUCTION_URL: 'recruit.vercel.app', VERCEL_URL: 'v-abc.vercel.app' }).baseUrl, 'https://recruit.vercel.app');
+  assert.equal(loadConfig({ ...prod, VERCEL_URL: 'v-abc.vercel.app' }).baseUrl, 'https://v-abc.vercel.app');
+  assert.equal(loadConfig({ ...prod, BASE_URL: 'not a url', VERCEL_URL: 'v.vercel.app' }).baseUrl, 'https://v.vercel.app');
+  const none = loadConfig(prod);
+  assert.equal(none.baseUrl, '');
+  assert.equal(resolveBaseUrl(none, { headers: { host: 'evil.example' } }), '', 'never from the Host header in production');
+  const devCfg = loadConfig({});
+  assert.equal(resolveBaseUrl(devCfg, { headers: { host: 'localhost:4000' } }), 'http://localhost:4000');
+  assert.equal(resolveBaseUrl(devCfg, { headers: { host: 'bad host/<x>' } }), 'http://localhost:3000');
+  assert.equal(resolveBaseUrl({ ...devCfg, baseUrl: 'https://x.example' }, { headers: { host: 'other' } }), 'https://x.example');
+});
+
+test('passwords: scrypt N=32768 r=8 p=1, per-user salt, parameters parsed from the string, constant-time compare', async () => {
+  const h1 = await hashPassword('correct horse battery');
+  const h2 = await hashPassword('correct horse battery');
+  assert.notEqual(h1, h2);
+  const [scheme, n, r, p, salt, key] = h1.split('$');
+  assert.deepEqual([scheme, n, r, p], ['scrypt', '32768', '8', '1']);
+  assert.equal(Buffer.from(salt, 'base64').length, 16);
+  assert.equal(Buffer.from(key, 'base64').length, 32);
+  assert.ok(await verifyPassword('correct horse battery', h1));
+  assert.ok(!(await verifyPassword('correct horse batterz', h1)));
+  assert.ok(!(await verifyPassword('', h1)));
+  // verify uses the parameters in the stored string (an old hash with other parameters still verifies)
+  const salt8 = Buffer.alloc(16, 1);
+  const old = `scrypt$16384$8$1$${salt8.toString('base64')}$${crypto.scryptSync('pw-old-params-1', salt8, 32, { N: 16384, r: 8, p: 1 }).toString('base64')}`;
+  assert.ok(await verifyPassword('pw-old-params-1', old));
+  // malformed or hostile stored values never match and never throw or allocate gigabytes
+  for (const bad of ['', null, undefined, 'plain', 'scrypt$1$2', 'bcrypt$32768$8$1$AA==$AA==', `scrypt$${2 ** 30}$8$1$${salt}$${key}`, `scrypt$32768$999$1$${salt}$${key}`, `scrypt$3$8$1$${salt}$${key}`, `scrypt$32768$8$1$$`]) {
+    assert.equal(await verifyPassword('anything', bad), false, String(bad));
+  }
+  assert.equal(validatePassword('a'.repeat(11)) !== null, true);
+  assert.equal(validatePassword('a'.repeat(12)), null);
+  assert.equal(validatePassword('a'.repeat(200)), null);
+  assert.notEqual(validatePassword('a'.repeat(201)), null);
+  assert.notEqual(validatePassword(undefined), null);
+  assert.notEqual(validatePassword(['a'.repeat(12)]), null);
+  // dummy hash: a real, verifiable-format hash that no password matches; cached
+  const d = await dummyHash();
+  assert.match(d, /^scrypt\$32768\$8\$1\$/);
+  assert.equal(await dummyHash(), d);
+  assert.ok(!(await verifyPassword('', d)));
+});
+
+test('crypto helpers: safeEqual is exact and never matches empty values; tokens are 43-char base64url; hashes are hex', () => {
+  assert.ok(safeEqual('abc', 'abc'));
+  assert.ok(!safeEqual('abc', 'abd'));
+  assert.ok(!safeEqual('abc', 'abcd'));
+  assert.ok(!safeEqual('', ''));
+  assert.ok(!safeEqual(undefined, undefined));
+  assert.ok(!safeEqual('abc', undefined));
+  assert.match(randomToken(), /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(randomToken(), randomToken());
+  assert.match(sha256Hex('x'), /^[0-9a-f]{64}$/);
+  assert.notEqual(hmacHex('k1', 'v'), hmacHex('k2', 'v'));
+});
+
+test('notify: posts {text} with role title and link only; non-2xx, errors and timeouts are logged by id and swallowed', async () => {
+  const calls = [];
+  const logs = [];
+  const ok = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200 };
+  };
+  const args = { webhookUrl: 'https://hooks.example.com/x', log: (m) => logs.push(m), roleTitle: 'Bears Writer', applicationId: 42, baseUrl: 'https://recruit.example.com' };
+  assert.equal(await notifyNewApplication({ ...args, fetchImpl: ok }), true);
+  assert.equal(calls[0].url, 'https://hooks.example.com/x');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { text: 'New application for Bears Writer: https://recruit.example.com/app/applications/42' });
+  assert.ok(calls[0].init.signal instanceof AbortSignal);
+  assert.equal(await notifyNewApplication({ ...args, webhookUrl: '', fetchImpl: ok }), false);
+  assert.equal(calls.length, 1);
+  assert.equal(await notifyNewApplication({ ...args, fetchImpl: async () => ({ ok: false, status: 500 }) }), false);
+  assert.equal(await notifyNewApplication({ ...args, fetchImpl: async () => { throw new Error('boom https://hooks.example.com/secret'); } }), false);
+  assert.deepEqual(logs, ['[webhook] failed application=42', '[webhook] failed application=42']);
 });
 
 test('rate limiter (database): 10 recorded hits per window per key; checking does not record', async () => {
@@ -162,6 +200,35 @@ test('rate limiter (database): 10 recorded hits per window per key; checking doe
     assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 1);
     // Neither the raw key value nor the secret is stored.
     assert.doesNotMatch(JSON.stringify(await f.db.all('SELECT * FROM rate_limits')), /203\.0\.113|s3cret/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('rate limiter reserve(): the guarded INSERT lets only `limit` of a parallel burst through; release() frees the hits of a success', async () => {
+  const f = await freshDb('sqlite');
+  try {
+    const key = rateKey('s3cret', 'login-email', 'a@b.example');
+    const spec = { key, limit: 5, windowMs: 900000 };
+    const results = await Promise.all(Array.from({ length: 12 }, () => reserve(f.db, [spec])));
+    assert.equal(results.filter((r) => r.ok).length, 5);
+    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 5);
+    const two = await reserve(f.db, [{ ...spec, limit: 100 }, { key: rateKey('s3cret', 'login-ip', '1.2.3.4'), limit: 1, windowMs: 900000 }, { key: rateKey('s3cret', 'login-ip', '1.2.3.4'), limit: 1, windowMs: 900000 }]);
+    assert.equal(two.ok, false, 'one refused key makes the whole reservation not ok');
+    // Ordered: a spec is only recorded when the specs before it were (so an IP over its limit adds no email keys).
+    await f.db.run('DELETE FROM rate_limits');
+    const ipKey = rateKey('s3cret', 'login-ip', '1.2.3.4');
+    await reserve(f.db, [{ key: ipKey, limit: 1, windowMs: 900000 }]);
+    await new Promise((r) => setTimeout(r, 3)); // distinct milliseconds, so the test is deterministic
+    const blocked = await reserve(f.db, [{ key: ipKey, limit: 1, windowMs: 900000 }, spec]);
+    assert.equal(blocked.ok, false);
+    assert.deepEqual(blocked.keys, []);
+    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits WHERE key = ?', [key])).n, 0);
+    await f.db.run('DELETE FROM rate_limits');
+    const r = await reserve(f.db, [spec]);
+    assert.equal(r.ok, true);
+    await release(f.db, r);
+    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 0);
   } finally {
     await f.close();
   }

@@ -1,23 +1,16 @@
 'use strict';
 // Public pages: openings list, role page + apply form, thanks.
-const fs = require('node:fs');
 const crypto = require('node:crypto');
-const path = require('node:path');
 const { html, multiline } = require('../lib/render');
 const { page, HEARD_FROM } = require('../lib/layout');
 const { readForm } = require('../lib/http');
 const { publicField, verifyPublic } = require('../lib/csrf');
 const { nowIso } = require('../lib/db');
 const { rateKey, allowed, recordStatements } = require('../lib/ratelimit');
-const { randomHex } = require('../lib/crypto');
 const { normaliseEmail } = require('../lib/auth');
+const { notifyNewApplication } = require('../lib/notify');
 
-const LIMITS = { name: 200, email: 254, linkedin: 2000, links: 2000, answer: 5000, source: 100 };
-const FILE_TYPES = {
-  pdf: (b) => b.subarray(0, 4).toString('latin1') === '%PDF',
-  doc: (b) => b.length >= 4 && b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0,
-  docx: (b) => b.length >= 2 && b[0] === 0x50 && b[1] === 0x4b, // "PK" (zip container)
-};
+const LIMITS = { name: 200, email: 254, linkedin: 2000, resume: 2000, links: 2000, answer: 5000, source: 100 };
 const RATE_LIMIT = 10; // stored applications / honeypot hits per IP
 const RATE_WINDOW_MS = 60 * 60 * 1000;
 
@@ -41,7 +34,7 @@ function questionsVersion(role) {
 }
 
 async function getRole(db, id) {
-  if (!/^\d+$/.test(String(id))) return null;
+  if (!/^\d+$/.test(String(id)) || !Number.isSafeInteger(Number(id))) return null;
   const role = await db.get('SELECT * FROM job_roles WHERE id = ?', [Number(id)]);
   if (role) role.questions = JSON.parse(role.questions_json || '[]');
   return role;
@@ -105,10 +98,9 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
       ${hasErrors
         ? html`<div class="flash flash-error" id="error-summary" tabindex="-1" role="alert">
             ${errors._questions ? html`<p>${errors._questions}</p>` : html`<p>Please fix the highlighted fields below.</p>`}
-            ${errors.file ? '' : html`<p>If you attached a file, please choose it again.</p>`}
           </div>`
         : ''}
-      <form method="post" action="/roles/${role.id}/apply#apply" enctype="multipart/form-data" class="stacked" novalidate>
+      <form method="post" action="/roles/${role.id}/apply#apply" class="stacked" novalidate>
         ${publicField(ctx)}
         <input type="hidden" name="source" value="${source}">
         <input type="hidden" name="qv" value="${questionsVersion(role)}">
@@ -121,15 +113,15 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
         <label>Email <span class="req">*</span>
           <input type="email" name="email" maxlength="${LIMITS.email}" value="${values.email || ''}" required>
         </label>${fieldError(errors, 'email')}
-        <label>LinkedIn or portfolio URL
-          <input type="url" name="linkedin_url" maxlength="${LIMITS.linkedin}" value="${values.linkedin_url || ''}">
+        <label>LinkedIn or portfolio URL <span class="muted">(https:// links only)</span>
+          <input type="text" inputmode="url" name="linkedin_url" maxlength="${LIMITS.linkedin}" value="${values.linkedin_url || ''}">
         </label>${fieldError(errors, 'linkedin_url')}
+        <label>Resume link <span class="muted">(optional; a link to your resume, https:// only)</span>
+          <input type="text" inputmode="url" name="resume_url" maxlength="${LIMITS.resume}" value="${values.resume_url || ''}">
+        </label>${fieldError(errors, 'resume_url')}
         <label>Writing sample links <span class="req">*</span> <span class="muted">(one URL per line)</span>
           <textarea name="sample_links" rows="4" maxlength="${LIMITS.links}" required>${values.sample_links || ''}</textarea>
         </label>${fieldError(errors, 'sample_links')}
-        <label>Resume or writing sample file <span class="muted">(optional; PDF, DOC or DOCX; up to ${ctx.app.config.maxUploadMb} MB)</span>
-          <input type="file" name="file" accept=".pdf,.doc,.docx">
-        </label>${fieldError(errors, 'file')}
         ${role.questions.map(
           (q, i) => html`<label>${q.text}${q.required ? html` <span class="req">*</span>` : ''}
               <textarea name="answer_${i}" rows="4" maxlength="${LIMITS.answer}"${q.required ? html` required` : ''}>${(values.answers || [])[i] || ''}</textarea>
@@ -146,26 +138,32 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
   });
 }
 
-// Accepts "https://x", "http://x" or a bare "example.com/x" (assumed https).
+// Accepts "https://x" or a bare "example.com/x" (https:// is added). http:// and every other scheme
+// (javascript:, data:, ftp:, ...) is refused. Returns '' for empty input and null for an invalid URL.
 function normaliseUrl(value) {
   let v = String(value || '').trim();
   if (!v) return '';
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(v)) v = `https://${v}`;
+  if (/^[/\\]|\s/.test(v)) return null;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(v);
+  const hostAndPort = /^[^/?#:@]+:\d+([/?#]|$)/.test(v); // "example.com:8080/x" is a host, not a scheme
+  if (hasScheme && !hostAndPort && !/^https:\/\//i.test(v)) return null;
+  if (!hasScheme || hostAndPort) v = `https://${v}`;
   try {
     const u = new URL(v);
-    if ((u.protocol === 'http:' || u.protocol === 'https:') && u.hostname.includes('.')) return u.toString();
+    if (u.protocol === 'https:' && u.hostname.includes('.') && !u.username && !u.password) return u.toString();
   } catch {
     /* invalid */
   }
   return null;
 }
 
-function validate(form, role, maxUploadBytes) {
+function validate(form, role) {
   const errors = {};
   const values = {
     name: form.get('name').replace(/\s+/g, ' ').trim(),
     email: form.get('email').trim(),
     linkedin_url: form.get('linkedin_url').trim(),
+    resume_url: form.get('resume_url').trim(),
     sample_links: form.get('sample_links').replace(/\r\n/g, '\n').trim(),
     heard_from: form.get('heard_from').trim(),
     source: cleanSource(form.get('source')),
@@ -182,14 +180,20 @@ function validate(form, role, maxUploadBytes) {
   let linkedin = '';
   if (values.linkedin_url) {
     if (values.linkedin_url.length > LIMITS.linkedin) errors.linkedin_url = `Must be at most ${LIMITS.linkedin} characters.`;
-    else if (!(linkedin = normaliseUrl(values.linkedin_url))) errors.linkedin_url = 'Please enter a valid http(s) URL.';
+    else if (!(linkedin = normaliseUrl(values.linkedin_url))) errors.linkedin_url = 'Please enter a valid https:// URL.';
+  }
+
+  let resume = '';
+  if (values.resume_url) {
+    if (values.resume_url.length > LIMITS.resume) errors.resume_url = `Must be at most ${LIMITS.resume} characters.`;
+    else if (!(resume = normaliseUrl(values.resume_url))) errors.resume_url = 'Please enter a valid https:// URL.';
   }
 
   const links = values.sample_links.split('\n').map((l) => l.trim()).filter(Boolean);
   const normalisedLinks = links.map(normaliseUrl);
   if (values.sample_links.length > LIMITS.links) errors.sample_links = `Links must be at most ${LIMITS.links} characters in total.`;
   else if (links.length === 0) errors.sample_links = 'Please add at least one writing sample link.';
-  else if (normalisedLinks.some((l) => !l)) errors.sample_links = 'Each line must be a valid http(s) URL.';
+  else if (normalisedLinks.some((l) => !l)) errors.sample_links = 'Each line must be a valid https:// URL.';
 
   role.questions.forEach((q, i) => {
     const a = values.answers[i];
@@ -199,16 +203,6 @@ function validate(form, role, maxUploadBytes) {
 
   if (values.heard_from && !HEARD_FROM.includes(values.heard_from)) errors.heard_from = 'Please pick one of the options.';
 
-  let file = form.file('file');
-  if (file) {
-    const ext = path.extname(file.filename).slice(1).toLowerCase();
-    if (!FILE_TYPES[ext]) errors.file = 'The file must be a PDF, DOC or DOCX.';
-    else if (file.data.length === 0) errors.file = 'The file is empty.';
-    else if (file.data.length > maxUploadBytes) errors.file = `The file must be at most ${Math.round(maxUploadBytes / 1048576)} MB.`;
-    else if (!FILE_TYPES[ext](file.data)) errors.file = `The file does not look like a real .${ext} file.`;
-    if (!errors.file) file = { ...file, ext };
-  }
-
   return {
     errors,
     values,
@@ -216,17 +210,17 @@ function validate(form, role, maxUploadBytes) {
       name: values.name,
       email: normaliseEmail(values.email),
       linkedin_url: linkedin || '',
+      resume_url: resume || '',
       sample_links: normalisedLinks.join('\n'),
       heard_from: values.heard_from,
       source_tag: values.source,
       answers: role.questions.map((q, i) => ({ question: q.text, answer: values.answers[i] })),
-      file: errors.file ? null : file,
     },
   };
 }
 
 async function applySubmit(ctx) {
-  const { db, config, mailer, log } = ctx.app;
+  const { db, config, log } = ctx.app;
   const role = await getRole(db, ctx.params.id);
   if (!role || role.status !== 'open') return closedPage(ctx);
 
@@ -239,7 +233,7 @@ async function applySubmit(ctx) {
     });
   }
 
-  const form = await readForm(ctx.req, config.maxBodyBytes);
+  const form = await readForm(ctx.req);
   verifyPublic(ctx, form);
 
   // Honeypot: pretend it worked, save nothing (still counts towards the rate limit).
@@ -248,7 +242,7 @@ async function applySubmit(ctx) {
     return ctx.redirect('/thanks');
   }
 
-  const { errors, values, clean } = validate(form, role, config.maxUploadBytes);
+  const { errors, values, clean } = validate(form, role);
   if (form.get('qv') !== questionsVersion(role)) {
     // The questionnaire changed after the form was loaded: show the current questions, keep the rest.
     return applyFormPage(ctx, role, {
@@ -259,60 +253,48 @@ async function applySubmit(ctx) {
   }
   if (Object.keys(errors).length) return applyFormPage(ctx, role, { values, errors, status: 400 });
 
-  let storedPath = null;
-  if (clean.file) {
-    const uploads = path.join(config.dataDir, 'uploads');
-    fs.mkdirSync(uploads, { recursive: true });
-    storedPath = `uploads/${randomHex(16)}.${clean.file.ext}`;
-    fs.writeFileSync(path.join(config.dataDir, storedPath), clean.file.data, { flag: 'wx' });
-  }
-
   // One atomic batch: person upsert, application, first event, rate-limit hit. The application and the event
   // find their ids in SQL (the person by email, the application via last_insert_rowid()), so no read-then-write.
   const now = nowIso();
-  let results;
-  try {
-    results = await db.batch([
-      {
-        sql: `INSERT INTO people (email, name, linkedin_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(email) DO UPDATE SET name = excluded.name, linkedin_url = excluded.linkedin_url, updated_at = excluded.updated_at`,
-        args: [clean.email, clean.name, clean.linkedin_url, now, now],
-      },
-      {
-        sql: `INSERT INTO applications (person_id, role_id, stage, sample_links, file_path, file_name, answers_json,
-                heard_from, source_tag, applied_at, stage_changed_at)
-              SELECT id, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ?`,
-        args: [
-          role.id,
-          clean.sample_links,
-          storedPath,
-          clean.file ? clean.file.filename.slice(0, 255) : null,
-          JSON.stringify(clean.answers),
-          clean.heard_from,
-          clean.source_tag,
-          now,
-          now,
-          clean.email,
-        ],
-      },
-      {
-        sql: "INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (last_insert_rowid(), 'stage_change', NULL, 'new', NULL, ?)",
-        args: [now],
-      },
-      ...recordStatements(limitKey),
-    ]);
-  } catch (err) {
-    if (storedPath) fs.rmSync(path.join(config.dataDir, storedPath), { force: true });
-    throw err;
-  }
+  const results = await db.batch([
+    {
+      sql: `INSERT INTO people (email, name, linkedin_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET name = excluded.name, linkedin_url = excluded.linkedin_url, updated_at = excluded.updated_at`,
+      args: [clean.email, clean.name, clean.linkedin_url, now, now],
+    },
+    {
+      sql: `INSERT INTO applications (person_id, role_id, stage, sample_links, resume_url, answers_json,
+              heard_from, source_tag, applied_at, stage_changed_at)
+            SELECT id, ?, 'new', ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ?`,
+      args: [
+        role.id,
+        clean.sample_links,
+        clean.resume_url,
+        JSON.stringify(clean.answers),
+        clean.heard_from,
+        clean.source_tag,
+        now,
+        now,
+        clean.email,
+      ],
+    },
+    {
+      sql: "INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (last_insert_rowid(), 'stage_change', NULL, 'new', NULL, ?)",
+      args: [now],
+    },
+    ...recordStatements(limitKey),
+  ]);
   const applicationId = results[1].lastInsertRowid;
-  const person = { email: clean.email, name: clean.name };
 
-  try {
-    await mailer.notifyNewApplication({ role, person, applicationId });
-  } catch (err) {
-    log(`[notify] unexpected error: ${err.message}`);
-  }
+  // Optional webhook after the batch has committed: role title and link only, never applicant data.
+  await notifyNewApplication({
+    webhookUrl: config.webhookUrl,
+    fetchImpl: ctx.app.fetchImpl,
+    log,
+    roleTitle: role.title,
+    applicationId,
+    baseUrl: ctx.baseUrl(),
+  });
   ctx.redirect('/thanks');
 }
 

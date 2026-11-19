@@ -1,9 +1,7 @@
 'use strict';
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count, pdf } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
 
 for (const driver of DRIVERS) describe(`[${driver}]`, () => {
 
@@ -166,55 +164,86 @@ test('AC-08: answers are snapshotted with question text; editing questions later
     qRole]);
 });
 
-test('AC-09: 9 MB PDF accepted; 11 MB rejected; .exe renamed to .pdf rejected', async () => {
+test('AC-53: LinkedIn, resume and sample links must be https; http, javascript: and data: are field errors; bare hosts get https://', async () => {
   const c = t.client();
-  const ok = await c.apply(openNfl, { email: 'ninemb@example.com' }, { file: { name: 'cv.pdf', data: pdf(9 * 1024 * 1024) } });
+  const before = await count(t.db, 'applications');
+  const bads = ['http://example.com/x', 'javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'data:text/html,<script>1</script>', 'ftp://example.com/x', 'mailto:a@b.example', 'https://user:pw@example.com/x', 'https://nodot', 'not a url', '//example.com/x'];
+  for (const bad of bads) {
+    for (const field of ['linkedin_url', 'resume_url']) {
+      const res = await c.apply(openNfl, { email: 'badlink@example.com', [field]: bad });
+      assert.equal(res.status, 400, `${field}: ${bad}`);
+      assert.match(res.text, new RegExp(`id="err-${field}"`));
+    }
+    const res = await c.apply(openNfl, { email: 'badlink@example.com', sample_links: `https://example.com/ok\n${bad}` });
+    assert.equal(res.status, 400, `sample: ${bad}`);
+    assert.match(res.text, /id="err-sample_links"/);
+  }
+  assert.equal(await count(t.db, 'applications'), before);
+  assert.equal(await count(t.db, 'people', "email = 'badlink@example.com'"), 0);
+
+  const ok = await c.apply(openNfl, {
+    email: 'goodlinks@example.com',
+    linkedin_url: 'linkedin.com/in/someone',
+    resume_url: 'https://docs.example.com/resume.pdf',
+    sample_links: 'example.com/post-1\nhttps://example.org/post-2\nexample.net:8080/post-3',
+  });
   assert.equal(ok.status, 303);
   const app = await lastApplication(t.db);
-  assert.equal(app.file_name, 'cv.pdf');
-  assert.match(app.file_path, /^uploads\/[0-9a-f]{32}\.pdf$/);
-  assert.equal(fs.statSync(path.join(t.dataDir, app.file_path)).size, 9 * 1024 * 1024);
-
-  const before = await count(t.db, 'applications');
-  const big = await c.apply(openNfl, { email: 'elevenmb@example.com' }, { file: { name: 'big.pdf', data: pdf(11 * 1024 * 1024) } });
-  assert.ok(big.status === 413 || (big.status === 400 && /at most 10 MB/.test(big.text)), `got ${big.status}`);
-
-  // Between the file limit and the body cap: a field error rather than 413.
-  const mid = await c.apply(openNfl, { email: 'tenhalf@example.com' }, { file: { name: 'mid.pdf', data: pdf(10.5 * 1024 * 1024) } });
-  assert.equal(mid.status, 400);
-  assert.match(mid.text, /at most 10 MB/);
-
-  const exe = Buffer.concat([Buffer.from('MZ\x90\x00'), Buffer.alloc(1000)]);
-  const bad = await c.apply(openNfl, { email: 'exe@example.com' }, { file: { name: 'resume.pdf', data: exe } });
-  assert.equal(bad.status, 400);
-  assert.match(bad.text, /does not look like a real \.pdf/);
-  const wrongExt = await c.apply(openNfl, { email: 'exe2@example.com' }, { file: { name: 'tool.exe', data: exe } });
-  assert.equal(wrongExt.status, 400);
-  assert.match(wrongExt.text, /must be a PDF, DOC or DOCX/);
-  assert.equal(await count(t.db, 'applications'), before);
-
-  // DOC and DOCX magic bytes are accepted
-  const doc = Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0]), Buffer.alloc(100)]);
-  assert.equal((await c.apply(openNfl, { email: 'doc@example.com' }, { file: { name: 'a.DOC', data: doc } })).status, 303);
-  const docx = Buffer.concat([Buffer.from('PK\x03\x04'), Buffer.alloc(100)]);
-  assert.equal((await c.apply(openNfl, { email: 'docx@example.com' }, { file: { name: 'a.docx', data: docx } })).status, 303);
+  assert.equal(app.resume_url, 'https://docs.example.com/resume.pdf');
+  assert.equal(app.sample_links, 'https://example.com/post-1\nhttps://example.org/post-2\nhttps://example.net:8080/post-3');
+  assert.equal((await t.db.get('SELECT linkedin_url FROM people WHERE id = ?', [app.person_id])).linkedin_url, 'https://linkedin.com/in/someone');
+  // Optional: no resume is fine.
+  assert.equal((await c.apply(openNfl, { email: 'noresume@example.com' })).status, 303);
+  assert.equal((await lastApplication(t.db)).resume_url, '');
 });
 
-test('AC-10: uploaded file downloads for signed-in users only, as an attachment', async () => {
-  const c = t.client();
-  const data = pdf(5000);
-  await c.apply(openNfl, { email: 'download@example.com' }, { file: { name: 'My CV "final".pdf', data } });
+test('AC-53: stored non-https values are never rendered as links; https links carry rel="noopener noreferrer"', async () => {
+  await t.client().apply(openNfl, { email: 'render@example.com', resume_url: 'https://docs.example.com/cv', linkedin_url: 'https://linkedin.com/in/r' });
   const app = await lastApplication(t.db);
-  const anon = await t.client().get(`/app/applications/${app.id}/file`);
-  assert.ok(anon.status === 302 || anon.status === 401);
-  if (anon.status === 302) assert.match(anon.headers.get('location'), /^\/login/);
-
   const r = t.client();
   await r.login('rep@fansided.com');
-  const res = await r.get(`/app/applications/${app.id}/file`);
-  assert.equal(res.status, 200);
-  assert.match(res.headers.get('content-disposition'), /^attachment;/);
-  assert.ok(res.buffer.equals(data));
+  let page = await r.get(`/app/applications/${app.id}`);
+  assert.match(page.text, /<a href="https:\/\/docs\.example\.com\/cv" rel="noopener noreferrer" target="_blank">/);
+  assert.match(page.text, /<a href="https:\/\/linkedin\.com\/in\/r" rel="noopener noreferrer" target="_blank">/);
+  for (const a of page.text.match(/<a [^>]*href="https?:\/\/[^"]*"[^>]*>/g) || []) assert.match(a, /rel="noopener noreferrer"/, a);
+  // Values that bypassed validation (written straight to the database) are shown as text only.
+  await t.db.run("UPDATE applications SET resume_url = 'javascript:alert(1)', sample_links = 'http://insecure.example/a\ndata:text/html,x\nhttps://safe.example/b' WHERE id = ?", [app.id]);
+  await t.db.run("UPDATE people SET linkedin_url = 'javascript:alert(2)' WHERE id = ?", [app.person_id]);
+  page = await r.get(`/app/applications/${app.id}`);
+  assert.doesNotMatch(page.text, /href="javascript:/i);
+  assert.doesNotMatch(page.text, /href="http:\/\/insecure/);
+  assert.doesNotMatch(page.text, /href="data:/i);
+  assert.match(page.text, /javascript:alert\(1\)/); // visible as text
+  assert.match(page.text, /<a href="https:\/\/safe\.example\/b" rel="noopener noreferrer"/);
+});
+
+test('AC-53: multipart/form-data posts are refused with 415 and nothing is stored; there is no file route', async () => {
+  const c = t.client();
+  await c.get(`/roles/${openNfl}`);
+  const fd = new FormData();
+  fd.append('csrf', c.csrf());
+  fd.append('name', 'Multi Part');
+  fd.append('email', 'multipart@example.com');
+  fd.append('sample_links', 'https://example.com');
+  fd.append('file', new Blob(['%PDF-1.4']), 'cv.pdf');
+  const res = await c.request('POST', `/roles/${openNfl}/apply`, { body: fd });
+  assert.equal(res.status, 415);
+  assert.equal(await count(t.db, 'people', "email = 'multipart@example.com'"), 0);
+  // Other content types are refused too (also on internal and login POSTs).
+  for (const type of ['application/json', 'text/plain']) {
+    assert.equal((await c.request('POST', `/roles/${openNfl}/apply`, { body: '{}', headers: { 'content-type': type } })).status, 415, type);
+  }
+  assert.equal((await c.request('POST', '/login', { body: fd })).status, 415);
+  // The upload form has no file field and no enctype.
+  const form = (await c.get(`/roles/${openNfl}`)).text;
+  assert.doesNotMatch(form, /type="file"|multipart/);
+  assert.match(form, /name="resume_url"/);
+  // No file route (signed in or not) and no uploads directory in the data dir.
+  const a = t.client();
+  await a.login('admin@fansided.com');
+  const app = await lastApplication(t.db);
+  assert.equal((await a.get(`/app/applications/${app.id}/file`)).status, 404);
+  assert.equal(require('node:fs').existsSync(require('node:path').join(t.dataDir, 'uploads')), false);
 });
 
 test('AC-11: honeypot shows thanks and stores nothing; 11th submission from one IP in an hour is rejected', async () => {
@@ -242,22 +271,34 @@ test('AC-11: honeypot shows thanks and stores nothing; 11th submission from one 
 test('public apply form rejects a missing double-submit CSRF token', async () => {
   const c = t.client();
   await c.get(`/roles/${openNfl}`);
-  const fd = new FormData();
-  fd.append('csrf', 'f'.repeat(64));
-  fd.append('name', 'X');
-  fd.append('email', 'csrfless@example.com');
-  fd.append('sample_links', 'https://example.com');
-  const res = await c.request('POST', `/roles/${openNfl}/apply`, { body: fd });
+  const res = await c.post(`/roles/${openNfl}/apply`, { name: 'X', email: 'csrfless@example.com', sample_links: 'https://example.com' }, { csrf: 'f'.repeat(64) });
   assert.equal(res.status, 403);
+  assert.equal((await c.post(`/roles/${openNfl}/apply`, { name: 'X', email: 'csrfless@example.com', sample_links: 'https://example.com' }, { csrf: null })).status, 403);
   assert.equal(await count(t.db, 'people', "email = 'csrfless@example.com'"), 0);
 });
 
-test('input length limits are enforced', async () => {
+test('AC-57: input length limits are enforced and a body over 512 KB is a 413', async () => {
   const c = t.client();
   const res = await c.apply(openNfl, { name: 'x'.repeat(201), email: 'long@example.com', sample_links: `https://example.com/${'a'.repeat(2000)}` });
   assert.equal(res.status, 400);
   assert.match(res.text, /id="err-name"/);
   assert.match(res.text, /id="err-sample_links"/);
+  const longUrls = await c.apply(openNfl, { email: 'longurl@example.com', linkedin_url: `https://example.com/${'a'.repeat(2000)}`, resume_url: `https://example.com/${'a'.repeat(2000)}` });
+  assert.equal(longUrls.status, 400);
+  assert.match(longUrls.text, /id="err-linkedin_url"/);
+  assert.match(longUrls.text, /id="err-resume_url"/);
+  const longEmail = await c.apply(openNfl, { email: `${'a'.repeat(250)}@example.com` });
+  assert.equal(longEmail.status, 400);
+  assert.match(longEmail.text, /id="err-email"/);
+  assert.equal(await count(t.db, 'people', "email LIKE 'long%' OR email LIKE 'aaaa%'"), 0);
+  // 512 KB cap for every POST (declared and streamed)
+  const big = await c.apply(openNfl, { email: 'huge@example.com', answer_x: 'z'.repeat(600 * 1024) });
+  assert.equal(big.status, 413);
+  assert.equal(await count(t.db, 'people', "email = 'huge@example.com'"), 0);
+  const stream = await c.request('POST', '/login', { body: `email=a&password=${'z'.repeat(520 * 1024)}`, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+  assert.equal(stream.status, 413);
+  const near = await c.apply(openNfl, { email: 'near@example.com', answer_x: 'z'.repeat(500 * 1024) });
+  assert.equal(near.status, 303);
   const longAnswer = await c.apply(qRole, { email: 'longans@example.com', answer_0: 'y'.repeat(5001) });
   assert.equal(longAnswer.status, 400);
   assert.match(longAnswer.text, /id="err-answer_0"/);

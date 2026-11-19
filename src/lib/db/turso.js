@@ -34,7 +34,7 @@ function encodeArg(v) {
   if (v === null) return { type: 'null' };
   if (typeof v === 'string') return { type: 'text', value: v };
   if (typeof v === 'bigint') return { type: 'integer', value: v.toString() };
-  if (typeof v === 'number') return Number.isInteger(v) ? { type: 'integer', value: String(v) } : { type: 'float', value: v };
+  if (typeof v === 'number') return Number.isSafeInteger(v) ? { type: 'integer', value: String(v) } : { type: 'float', value: v }; // 1e23 would stringify as "1e+23"
   return { type: 'blob', base64: Buffer.from(v).toString('base64') }; // Buffer (checked by normaliseArgs)
 }
 

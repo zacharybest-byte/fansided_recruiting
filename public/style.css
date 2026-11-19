@@ -129,3 +129,5 @@ table.pipeline col.c-source { width: 14%; }
 table.pipeline col.c-days { width: 9%; }
 table.pipeline col.c-move { width: 22%; }
 table.pipeline form.inline { flex-wrap: nowrap; }
+.since { display: block; font-size: 0.75rem; font-weight: 600; color: #8a5a00; white-space: nowrap; }
+input.wide { width: 100%; max-width: 48rem; font-family: monospace; }

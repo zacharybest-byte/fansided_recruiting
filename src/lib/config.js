@@ -1,82 +1,113 @@
 'use strict';
-// Reads configuration from environment variables (see README / .env.example).
+// Configuration. Exactly these environment variables are read (see README / .env.example):
+//   TURSO_DATABASE_URL, TURSO_AUTH_TOKEN, SESSION_SECRET, ADMIN_EMAIL, SETUP_TOKEN, BASE_URL,
+//   NOTIFY_WEBHOOK_URL, plus PORT, NODE_ENV, VERCEL, VERCEL_URL, VERCEL_PROJECT_PRODUCTION_URL.
+// Tests pass options to createApp() instead of using more variables.
 const path = require('node:path');
-const crypto = require('node:crypto');
 
-function list(value) {
-  return String(value || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+const TIMEZONE = 'America/New_York';
+const DEV_SECRET = 'dev-only-session-secret-do-not-use-in-production';
+
+// Thrown for unusable configuration. `missing` holds variable NAMES only, never values.
+class ConfigError extends Error {
+  constructor(missing) {
+    super(`Missing or invalid configuration: ${missing.join(', ')}`);
+    this.name = 'ConfigError';
+    this.missing = missing;
+  }
+}
+
+function parseUrl(value, protocols) {
+  try {
+    const u = new URL(String(value).trim());
+    return protocols.includes(u.protocol) && !u.username && !u.password ? u : null;
+  } catch {
+    return null;
+  }
 }
 
 function loadConfig(env = process.env) {
-  const production = env.NODE_ENV === 'production';
-  const port = Number(env.PORT || 3000);
-  const config = {
-    production,
-    port,
-    baseUrl: (env.BASE_URL || `http://localhost:${port}`).replace(/\/+$/, ''),
-    dataDir: path.resolve(env.DATA_DIR || './data'),
-    // Database: TURSO_DATABASE_URL set = Turso over HTTP; otherwise a local SQLite file under dataDir.
-    tursoUrl: (env.TURSO_DATABASE_URL || '').trim(),
-    tursoToken: env.TURSO_AUTH_TOKEN || '',
-    // Keys the rate-limit hashes. Engineer B replaces this with a required SESSION_SECRET.
-    secret: env.SESSION_SECRET || 'dev-only-secret-change-me-0123456789abcdef',
-    googleClientId: env.GOOGLE_CLIENT_ID || '',
-    googleClientSecret: env.GOOGLE_CLIENT_SECRET || '',
-    allowedEmailDomains: list(env.ALLOWED_EMAIL_DOMAINS),
-    adminEmails: list(env.ADMIN_EMAILS),
-    maxUploadMb: Number(env.MAX_UPLOAD_MB || 10),
-    timezone: env.APP_TIMEZONE || 'America/New_York',
-    voltaxApiUrl: env.VOLTAX_API_URL || '',
-    voltaxApiKey: env.VOLTAX_API_KEY || '',
-    devLogin: env.DEV_LOGIN === '1',
-    emailMode: (env.EMAIL_MODE || 'gmail').toLowerCase(),
-    // Number of trusted reverse proxies in front of the app (0 = use the socket address).
-    trustProxy: /^\d+$/.test(env.TRUST_PROXY || '') ? Number(env.TRUST_PROXY) : 0,
-    quiet: env.QUIET === '1',
-    tokenKey: null,
-  };
+  const vercel = Boolean(env.VERCEL);
+  const production = env.NODE_ENV === 'production' || vercel;
+  const warnings = [];
+  const tursoUrl = String(env.TURSO_DATABASE_URL || '').trim();
+  const tursoToken = String(env.TURSO_AUTH_TOKEN || '');
+  const sessionSecret = String(env.SESSION_SECRET || '');
 
-  if (config.tursoUrl && !config.tursoToken) throw new Error('TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set.');
-  if (config.devLogin && production) {
-    throw new Error('DEV_LOGIN=1 is refused when NODE_ENV=production.');
-  }
-  if (!['gmail', 'log'].includes(config.emailMode)) {
-    throw new Error('EMAIL_MODE must be "gmail" or "log".');
-  }
-  if (!Number.isFinite(config.maxUploadMb) || config.maxUploadMb <= 0) {
-    throw new Error('MAX_UPLOAD_MB must be a positive number.');
-  }
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: config.timezone });
-  } catch {
-    throw new Error(`APP_TIMEZONE "${config.timezone}" is not a valid IANA time zone.`);
-  }
-
-  if (env.TOKEN_ENCRYPTION_KEY) {
-    const key = Buffer.from(env.TOKEN_ENCRYPTION_KEY, 'base64');
-    if (key.length !== 32) throw new Error('TOKEN_ENCRYPTION_KEY must be 32 bytes, base64-encoded.');
-    config.tokenKey = key;
-  } else if (production) {
-    throw new Error('TOKEN_ENCRYPTION_KEY is required when NODE_ENV=production.');
-  } else {
-    // Dev only: a throwaway key. Stored refresh tokens become unreadable after a restart.
-    config.tokenKey = crypto.randomBytes(32);
-    config.ephemeralTokenKey = true;
-  }
-
+  const missing = [];
   if (production) {
-    if (!config.googleClientId || !config.googleClientSecret) {
-      throw new Error('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required when NODE_ENV=production.');
-    }
-    if (!env.BASE_URL) throw new Error('BASE_URL is required when NODE_ENV=production.');
+    if (sessionSecret.length < 32) missing.push('SESSION_SECRET');
+    if (!tursoUrl) missing.push('TURSO_DATABASE_URL');
+    if (!tursoToken) missing.push('TURSO_AUTH_TOKEN');
+  } else if (tursoUrl && !tursoToken) {
+    missing.push('TURSO_AUTH_TOKEN');
+  }
+  if (missing.length) throw new ConfigError(missing);
+
+  let secret = sessionSecret;
+  if (!production && sessionSecret.length < 32) {
+    secret = DEV_SECRET;
+    warnings.push('SESSION_SECRET is missing or shorter than 32 characters: using a fixed development value. Never do this in production.');
   }
 
-  config.maxUploadBytes = Math.floor(config.maxUploadMb * 1024 * 1024);
-  config.maxBodyBytes = config.maxUploadBytes + 1024 * 1024;
-  return config;
+  const adminEmail = String(env.ADMIN_EMAIL || '').trim().toLowerCase();
+  let validAdmin = adminEmail;
+  if (adminEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
+    validAdmin = '';
+    warnings.push('ADMIN_EMAIL is not a valid email address: the setup link is disabled.');
+  }
+  let setupToken = String(env.SETUP_TOKEN || '');
+  if (setupToken && setupToken.length < 20) {
+    setupToken = '';
+    warnings.push('SETUP_TOKEN is shorter than 20 characters: the setup link is disabled.');
+  }
+
+  let webhookUrl = '';
+  if (env.NOTIFY_WEBHOOK_URL) {
+    const u = parseUrl(env.NOTIFY_WEBHOOK_URL, ['https:']);
+    if (u) webhookUrl = u.toString();
+    else warnings.push('NOTIFY_WEBHOOK_URL must be an https:// URL: the webhook is ignored.');
+  }
+
+  // Base URL (SPEC section 6): BASE_URL, else VERCEL_PROJECT_PRODUCTION_URL, else VERCEL_URL, else (outside
+  // production only) the request host, resolved per request by resolveBaseUrl().
+  let baseUrl = '';
+  const candidates = [];
+  if (env.BASE_URL) candidates.push(['BASE_URL', env.BASE_URL]);
+  if (env.VERCEL_PROJECT_PRODUCTION_URL) candidates.push(['VERCEL_PROJECT_PRODUCTION_URL', `https://${env.VERCEL_PROJECT_PRODUCTION_URL}`]);
+  if (env.VERCEL_URL) candidates.push(['VERCEL_URL', `https://${env.VERCEL_URL}`]);
+  for (const [name, value] of candidates) {
+    const u = parseUrl(value, ['https:', 'http:']);
+    if (u) {
+      baseUrl = `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+      break;
+    }
+    warnings.push(`${name} is not a valid URL and was ignored.`);
+  }
+
+  return {
+    production,
+    vercel,
+    port: Number(env.PORT) > 0 ? Number(env.PORT) : 3000,
+    dataDir: path.resolve('./data'),
+    tursoUrl,
+    tursoToken,
+    secret,
+    adminEmail: validAdmin,
+    setupToken,
+    baseUrl,
+    webhookUrl,
+    timezone: TIMEZONE,
+    warnings,
+  };
 }
 
-module.exports = { loadConfig };
+// Public base URL for links in invite pages and webhook messages ('' when it cannot be known safely).
+function resolveBaseUrl(config, req) {
+  if (config.baseUrl) return config.baseUrl;
+  if (config.production) return '';
+  const host = String((req && req.headers && req.headers.host) || '');
+  return /^[a-z0-9.\-]+(:\d{1,5})?$/i.test(host) ? `http://${host}` : `http://localhost:${config.port}`;
+}
+
+module.exports = { loadConfig, resolveBaseUrl, ConfigError, TIMEZONE, DEV_SECRET };

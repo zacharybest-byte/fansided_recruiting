@@ -25,7 +25,7 @@ describe(`[${driver}] QA fixes`, () => {
     const app = await lastApplication(t.db);
     await admin.get(`/app/applications/${app.id}`);
     await admin.post(`/app/applications/${app.id}/notes`, { body: 'n' });
-    await admin.post(`/app/applications/${app.id}/email`, { subject: 's', body: 'b' });
+    await admin.post(`/app/applications/${app.id}/email`, { via: 'gmail', subject: 's', body: 'b' });
     const ids = {
       person: app.person_id,
       app: app.id,
@@ -43,7 +43,7 @@ describe(`[${driver}] QA fixes`, () => {
     assert.ok((await t.db.get('SELECT MAX(id) AS m FROM application_events')).m > ids.event);
     await admin.get(`/app/applications/${next.id}`);
     await admin.post(`/app/applications/${next.id}/notes`, { body: 'n2' });
-    await admin.post(`/app/applications/${next.id}/email`, { subject: 's2', body: 'b2' });
+    await admin.post(`/app/applications/${next.id}/email`, { via: 'gmail', subject: 's2', body: 'b2' });
     assert.ok((await t.db.get('SELECT MAX(id) AS m FROM notes')).m > ids.note);
     assert.ok((await t.db.get('SELECT MAX(id) AS m FROM emails_sent')).m > ids.email);
     // The old notification link does not open someone else.
@@ -73,9 +73,7 @@ describe(`[${driver}] QA fixes`, () => {
     const c = t.client({ ip: '198.51.100.7' });
     for (let i = 0; i < 12; i++) assert.equal((await c.apply(role, { name: '', answer_0: 'a' })).status, 400); // invalid
     await c.get(`/roles/${role}`);
-    const fd = new FormData();
-    fd.append('csrf', 'bad');
-    for (let i = 0; i < 3; i++) assert.equal((await c.request('POST', `/roles/${role}/apply`, { body: fd })).status, 403); // CSRF failures
+    for (let i = 0; i < 3; i++) assert.equal((await c.post(`/roles/${role}/apply`, { name: 'x' }, { csrf: 'bad' })).status, 403); // CSRF failures
     for (let i = 1; i <= 9; i++) assert.equal((await c.apply(role, { email: `rl${i}@example.com`, answer_0: 'a' })).status, 303, `valid ${i}`);
     assert.equal((await c.apply(role, { email: 'rl-hp@example.com', website: 'spam', answer_0: 'a' })).status, 303); // 10th: honeypot
     assert.equal((await c.apply(role, { email: 'rl11@example.com', answer_0: 'a' })).status, 429);
@@ -87,7 +85,7 @@ describe(`[${driver}] QA fixes`, () => {
     const app = await lastApplication(t.db);
     await admin.get(`/app/applications/${app.id}`);
     await admin.post(`/app/applications/${app.id}/notes`, { body: 'Written under QA Role' });
-    await admin.post(`/app/applications/${app.id}/email`, { subject: 'Sent under QA Role', body: 'x' });
+    await admin.post(`/app/applications/${app.id}/email`, { via: 'gmail', subject: 'Sent under QA Role', body: 'x' });
     await admin.post(`/app/applications/${app.id}/role`, { role_id: String(other) });
     const page = await admin.get(`/app/applications/${app.id}`);
     const notes = page.text.split('id="notes"')[1].split('</section>')[0];
@@ -172,29 +170,6 @@ describe(`[${driver}] QA fixes`, () => {
   });
 });
 
-test(`[${driver}] #11 production logs carry ids, not applicant names or emails`, async () => {
-  const lines = [];
-  const t = await startApp({ driver,
-    env: { NODE_ENV: 'production', DEV_LOGIN: '0', GOOGLE_CLIENT_ID: 'cid', GOOGLE_CLIENT_SECRET: 'sec', BASE_URL: 'https://recruit.example.com' },
-    log: (l) => lines.push(l),
-  });
-  try {
-    const rep = await makeUser(t.db, { email: 'rep@fansided.com', name: 'Rita Rep' });
-    const role = await makeRole(t.db, { title: 'Prod Role', assigned: rep });
-    t.app.mailer.mode = 'log';
-    assert.equal((await t.client().apply(role, { email: 'private.person@example.com', name: 'Private Person' })).status, 303);
-    t.app.mailer.deliver = async () => {
-      throw new Error('down');
-    };
-    await t.client().apply(role, { email: 'private.two@example.com', name: 'Private Two' });
-    const all = lines.join('\n');
-    assert.match(all, /\[notify\]/);
-    assert.doesNotMatch(all, /private|Private/);
-  } finally {
-    await t.close();
-  }
-});
-
 // Replaces the v1 "migration 3 upgrades an existing database" test: v2 starts from a fresh baseline schema
 // (a v1 file is not migrated), so this checks that baseline keeps the v1.1 guarantees on both drivers.
 test(`[${driver}] #1 baseline schema: ids never reused, foreign keys enforced, append-only events, seeded templates`, async () => {
@@ -202,6 +177,16 @@ test(`[${driver}] #1 baseline schema: ids never reused, foreign keys enforced, a
   try {
     const { db } = f;
     assert.equal((await db.get('SELECT COUNT(*) AS n FROM email_templates')).n, 4);
+    // v2 schema: password auth, hashed sessions, link tokens, no Google/dev-mail/upload leftovers
+    const cols = async (tbl) => (await db.all(`PRAGMA table_info(${tbl})`)).map((c) => c.name);
+    assert.deepEqual(await cols('sessions'), ['token_hash', 'user_id', 'created_at', 'expires_at']);
+    assert.deepEqual(await cols('auth_tokens'), ['id', 'user_id', 'kind', 'token_hash', 'expires_at', 'used_at', 'created_by_user_id', 'created_at']);
+    assert.deepEqual(await cols('users'), ['id', 'email', 'name', 'role', 'active', 'password_hash', 'password_changed_at', 'dashboard_seen_at', 'created_at']);
+    assert.deepEqual(await cols('emails_sent'), ['id', 'person_id', 'application_id', 'role_id', 'template_id', 'sender_user_id', 'to_email', 'subject', 'body', 'via', 'sent_at']);
+    assert.ok((await cols('applications')).includes('resume_url'));
+    assert.ok(!(await cols('applications')).some((c) => /^file_/.test(c)));
+    for (const tbl of ['job_roles', 'people']) assert.ok((await cols(tbl)).includes('is_sample'), tbl);
+    assert.equal(await db.get("SELECT name FROM sqlite_master WHERE name = 'dev_mail_log'"), undefined);
     for (const tbl of ['people', 'applications', 'application_events', 'notes', 'emails_sent', 'email_templates', 'deletion_log']) {
       assert.match((await db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [tbl])).sql, /AUTOINCREMENT/, tbl);
     }

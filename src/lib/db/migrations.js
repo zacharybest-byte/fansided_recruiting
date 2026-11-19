@@ -16,16 +16,31 @@ const BASELINE = [
     name TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT 'rep' CHECK (role IN ('admin','rep')),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
-    google_refresh_token_enc TEXT,
+    password_hash TEXT,
+    password_changed_at TEXT,
+    dashboard_seen_at TEXT,
     created_at TEXT NOT NULL
   )`,
+  // token_hash = SHA-256 of the cookie token; the token itself is never stored.
   `CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
+    token_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    csrf_token TEXT NOT NULL,
+    created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
   )`,
   'CREATE INDEX sessions_user ON sessions(user_id)',
+  // Invite and password-reset links. token_hash = SHA-256 of the link token.
+  `CREATE TABLE auth_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('invite','reset')),
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_by_user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+  )`,
+  'CREATE INDEX auth_tokens_user ON auth_tokens(user_id)',
   `CREATE TABLE job_roles (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
@@ -35,6 +50,7 @@ const BASELINE = [
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
     assigned_user_id INTEGER REFERENCES users(id),
     questions_json TEXT NOT NULL DEFAULT '[]',
+    is_sample INTEGER NOT NULL DEFAULT 0 CHECK (is_sample IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -43,6 +59,7 @@ const BASELINE = [
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     linkedin_url TEXT NOT NULL DEFAULT '',
+    is_sample INTEGER NOT NULL DEFAULT 0 CHECK (is_sample IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -52,8 +69,7 @@ const BASELINE = [
     role_id INTEGER NOT NULL REFERENCES job_roles(id),
     stage TEXT NOT NULL DEFAULT 'new' CHECK (stage IN ('new','reviewing','trial','onboarded','passed')),
     sample_links TEXT NOT NULL DEFAULT '',
-    file_path TEXT,
-    file_name TEXT,
+    resume_url TEXT NOT NULL DEFAULT '',
     answers_json TEXT NOT NULL DEFAULT '[]',
     heard_from TEXT NOT NULL DEFAULT '',
     source_tag TEXT NOT NULL DEFAULT '',
@@ -106,9 +122,7 @@ const BASELINE = [
     to_email TEXT NOT NULL,
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
-    gmail_message_id TEXT,
-    status TEXT NOT NULL CHECK (status IN ('sent','failed')),
-    error TEXT,
+    via TEXT NOT NULL CHECK (via IN ('gmail','mailto')),
     sent_at TEXT NOT NULL
   )`,
   'CREATE INDEX emails_person ON emails_sent(person_id)',
@@ -116,16 +130,6 @@ const BASELINE = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     deleted_person_id INTEGER NOT NULL,
     actor_user_id INTEGER REFERENCES users(id),
-    at TEXT NOT NULL
-  )`,
-  // Only written when EMAIL_MODE=log (local development and tests).
-  `CREATE TABLE dev_mail_log (
-    id INTEGER PRIMARY KEY,
-    from_user_id INTEGER,
-    from_email TEXT NOT NULL,
-    to_email TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    body TEXT NOT NULL,
     at TEXT NOT NULL
   )`,
   `CREATE TABLE rate_limits (
@@ -160,7 +164,7 @@ const TEMPLATES = [
 
 // statements() is called when the migration runs, so timestamps are taken at that moment.
 const MIGRATIONS = [
-  { version: 1, name: 'baseline schema (v1.1 plus rate_limits)', statements: () => BASELINE },
+  { version: 1, name: 'baseline schema (v2: password auth, auth_tokens, rate_limits, resume_url, is_sample)', statements: () => BASELINE },
   {
     version: 2,
     name: 'seed email templates',

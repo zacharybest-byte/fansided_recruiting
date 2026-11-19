@@ -1,9 +1,7 @@
 'use strict';
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count, pdf } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
 const { CSV_COLUMNS } = require('../src/routes/dashboard');
 const { MIGRATIONS } = require('../src/lib/db');
 
@@ -103,13 +101,15 @@ test('AC-29: admin creates a role with 5 questions, edits it and closes it; clos
   assert.match(res.text, /value="NBA"/);
 });
 
-test('AC-30: add user, promote to admin, deactivate; cannot deactivate self or remove the last admin', async () => {
+test('AC-30: add user, promote to admin, deactivate; cannot deactivate or demote yourself or the last admin with a password', async () => {
   await admin.get('/app/admin/users');
   let res = await admin.post('/app/admin/users', { email: 'New.Person@FanSided.com', name: 'New Person', role: 'rep' });
-  assert.equal(res.status, 303);
+  assert.equal(res.status, 200);
+  const token = /token=([A-Za-z0-9_-]{43})/.exec(res.text)[1];
   const u = await t.db.get("SELECT * FROM users WHERE email = 'new.person@fansided.com'");
   assert.equal(u.role, 'rep');
   assert.equal(u.active, 1);
+  assert.equal(u.password_hash, null);
   res = await admin.post('/app/admin/users', { email: 'new.person@fansided.com', name: 'Dup', role: 'rep' });
   assert.equal(res.status, 400);
   assert.match(res.text, /already exists/);
@@ -118,9 +118,12 @@ test('AC-30: add user, promote to admin, deactivate; cannot deactivate self or r
   await admin.post(`/app/admin/users/${u.id}/role`, { role: 'admin' });
   assert.equal((await t.db.get('SELECT role FROM users WHERE id = ?', [u.id])).role, 'admin');
 
-  // New admin can sign in and use admin pages.
+  // The new admin takes the invite, signs in and uses admin pages.
+  const invitee = t.client();
+  await invitee.get('/login');
+  assert.equal((await invitee.post('/set-password', { token, password: 'new persons password', password_confirm: 'new persons password' })).status, 303);
   const c = t.client();
-  await c.login('new.person@fansided.com');
+  await c.login('new.person@fansided.com', 'new persons password');
   assert.equal((await c.get('/app/admin/users')).status, 200);
 
   // Deactivate them (the original admin remains).
@@ -129,32 +132,50 @@ test('AC-30: add user, promote to admin, deactivate; cannot deactivate self or r
   assert.equal(res.status, 303);
   assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [u.id])).active, 0);
   assert.equal((await c.get('/app')).status, 302);
-  assert.equal((await c.login('new.person@fansided.com')).status, 403);
+  assert.equal((await c.login('new.person@fansided.com', 'new persons password')).status, 401);
+  assert.match((await admin.get('/app/admin/users')).text, /Deactivated/);
 
   // Cannot deactivate self.
   const me = (await t.db.get("SELECT id FROM users WHERE email = 'admin@fansided.com'")).id;
-  await admin.get('/app/admin/users');
   res = await admin.post(`/app/admin/users/${me}/deactivate`, {});
   let page = await admin.follow(res);
   assert.match(page.text, /You cannot deactivate yourself/);
   assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [me])).active, 1);
 
-  // Cannot demote the last active admin.
+  // Cannot demote self (the last active admin).
   res = await admin.post(`/app/admin/users/${me}/role`, { role: 'rep' });
   page = await admin.follow(res);
-  assert.match(page.text, /last active admin/);
+  assert.match(page.text, /You cannot change your own role/);
   assert.equal((await t.db.get('SELECT role FROM users WHERE id = ?', [me])).role, 'admin');
 
-  // With two active admins, one can deactivate the other; the remaining admin is then protected
-  // (self-deactivation and last-admin demotion are refused above).
+  // With two admins, one can deactivate the other. Cannot demote oneself even then.
   const other = await makeUser(t.db, { email: 'other.admin@fansided.com', role: 'admin' });
   await admin.get('/app/admin/users');
+  res = await admin.post(`/app/admin/users/${me}/role`, { role: 'rep' });
+  assert.equal((await t.db.get('SELECT role FROM users WHERE id = ?', [me])).role, 'admin');
   res = await admin.post(`/app/admin/users/${other}/deactivate`, {});
   assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [other])).active, 0);
+
+  // An admin who has not set a password yet cannot sign in, so it can be deactivated freely.
+  const pending = await makeUser(t.db, { email: 'pending.admin@fansided.com', role: 'admin', password: null });
+  await admin.get('/app/admin/users');
+  await admin.post(`/app/admin/users/${pending}/deactivate`, {});
+  assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [pending])).active, 0);
 
   // Reactivate.
   res = await admin.post(`/app/admin/users/${u.id}/reactivate`, {});
   assert.equal((await t.db.get('SELECT active FROM users WHERE id = ?', [u.id])).active, 1);
+});
+
+test('AC-30: the users page shows Active / Invite pending / Deactivated', async () => {
+  await makeUser(t.db, { email: 'st-active@fansided.com' });
+  await makeUser(t.db, { email: 'st-pending@fansided.com', password: null });
+  await makeUser(t.db, { email: 'st-off@fansided.com', active: 0 });
+  const text = (await admin.get('/app/admin/users')).text;
+  const cell = (email) => new RegExp(`${email}</td>[\\s\\S]*?<td class="status-cell">([^<]*)</td>`).exec(text)[1];
+  assert.equal(cell('st-active@fansided.com'), 'Active');
+  assert.equal(cell('st-pending@fansided.com'), 'Invite pending');
+  assert.equal(cell('st-off@fansided.com'), 'Deactivated');
 });
 
 test('AC-30: deactivating a user who still has roles shows a warning first', async () => {
@@ -217,21 +238,21 @@ test('AC-32: CSV export columns, one row per application, date filter, formula-i
   assert.match((await rep.get('/app/export')).text, /type="date" name="from"/);
 });
 
-test('AC-33: deleting a candidate removes person, applications, events, notes, emails, files; logs one deletion', async () => {
+test('AC-33: deleting a candidate removes person, applications, events, notes, email records; logs one deletion', async () => {
   const roleA = await makeRole(t.db, { title: 'Delete A' });
   const roleB = await makeRole(t.db, { title: 'Delete B' });
-  await t.client().apply(roleA, { email: 'forget.me@example.com', name: 'Forget Me' }, { file: { name: 'cv.pdf', data: pdf(3000) } });
+  await t.client().apply(roleA, { email: 'forget.me@example.com', name: 'Forget Me', resume_url: 'https://example.com/cv' });
   const a1 = await lastApplication(t.db);
-  await t.client().apply(roleB, { email: 'forget.me@example.com', name: 'Forget Me' }, { file: { name: 'cv2.pdf', data: pdf(3000) } });
+  await t.client().apply(roleB, { email: 'forget.me@example.com', name: 'Forget Me' });
   const a2 = await lastApplication(t.db);
-  const files = [a1.file_path, a2.file_path].map((f) => path.join(t.dataDir, f));
-  files.forEach((f) => assert.ok(fs.existsSync(f)));
   await admin.get(`/app/applications/${a1.id}`);
   await admin.post(`/app/applications/${a1.id}/notes`, { body: 'note 1' });
   await admin.post(`/app/applications/${a2.id}/stage`, { stage: 'reviewing' });
-  await admin.post(`/app/applications/${a2.id}/email`, { subject: 'Hi', body: 'There' });
+  await admin.post(`/app/applications/${a2.id}/email`, { via: 'gmail', subject: 'Hi', body: 'There' });
   const personId = a1.person_id;
   const keep = await count(t.db, 'applications') - 2;
+  const keepEmails = await count(t.db, 'emails_sent') - 1;
+  assert.equal(await count(t.db, 'emails_sent', 'person_id = ?', personId), 1);
 
   const confirm = await admin.get(`/app/people/${personId}/delete?from=${a1.id}`);
   assert.equal(confirm.status, 200);
@@ -245,12 +266,13 @@ test('AC-33: deleting a candidate removes person, applications, events, notes, e
   assert.equal(await count(t.db, 'application_events', 'application_id IN (?, ?)', a1.id, a2.id), 0);
   assert.equal(await count(t.db, 'notes', 'person_id = ?', personId), 0);
   assert.equal(await count(t.db, 'emails_sent', 'person_id = ?', personId), 0);
-  files.forEach((f) => assert.ok(!fs.existsSync(f)));
   assert.equal(await count(t.db, 'applications'), keep);
+  assert.equal(await count(t.db, 'emails_sent'), keepEmails);
   const log = await t.db.all('SELECT * FROM deletion_log');
   assert.equal(log.length, 1);
   assert.equal(log[0].deleted_person_id, personId);
   assert.deepEqual(Object.keys(log[0]).sort(), ['actor_user_id', 'at', 'deleted_person_id', 'id']);
+  assert.doesNotMatch(JSON.stringify(log), /forget|Forget/);
   assert.equal((await admin.get(`/app/applications/${a1.id}`)).status, 404);
 });
 
@@ -267,13 +289,17 @@ test('AC-34: user-entered <script> is escaped on every page', async () => {
 
   // Applicant-entered content
   const c = t.client();
-  await c.apply(role, { name: `N ${x}`, email: 'xss@example.com', sample_links: `https://example.com/?q=${x}`, answer_0: `A ${x}`, source: x });
+  await c.apply(role, { name: `N ${x}`, email: 'xss@example.com', sample_links: `https://example.com/?q=${x}`, resume_url: `https://example.com/cv?r=${x}`, answer_0: `A ${x}`, source: x });
   const app = await lastApplication(t.db);
   assert.ok(app, 'application saved');
+  assert.match(app.resume_url, /%3Cscript%3E/); // URL-encoded by the URL parser, and rendered escaped anyway
   assert.match(app.source_tag, /<script>/);
   await admin.get(`/app/applications/${app.id}`);
   await admin.post(`/app/applications/${app.id}/notes`, { body: `Note ${x}` });
-  await admin.post(`/app/applications/${app.id}/email`, { subject: `Mail ${x}`, body: `Mail body ${x}` });
+  const handoff = await admin.post(`/app/applications/${app.id}/email`, { via: 'gmail', subject: `Mail ${x}`, body: `Mail body ${x}` });
+  assert.equal(handoff.status, 200);
+  assert.ok(!handoff.text.includes('<script>alert'), 'hand-off page is escaped / percent-encoded');
+  assert.match(handoff.text, /Mail%20%3Cscript%3Ealert\(1\)%3C%2Fscript%3E/);
   const tpl = (await t.db.get("SELECT id FROM email_templates WHERE name LIKE 'T <script>%'")).id;
 
   // Bad URL schemes are never links
@@ -301,17 +327,24 @@ test('AC-34: user-entered <script> is escaped on every page', async () => {
     assert.equal(res.status, 200, url);
     assert.ok(!res.text.includes('<script>alert'), `unescaped script on ${url}`);
     assert.ok(!/<script>(?!<\/)/.test(res.text.replace('<script src="/public/app.js" defer></script>', '')), `script tag on ${url}`);
-    assert.ok(res.text.includes('&lt;script&gt;'), `escaped text missing on ${url}`);
+    assert.ok(res.text.includes('&lt;script&gt;') || res.text.includes('%3Cscript%3E'), `escaped text missing on ${url}`);
+    assert.ok(!/ on[a-z]+=|style=/i.test(res.text.replace(/data-confirm="[^"]*"/g, '')), `inline handler or style on ${url}`);
   }
+  // Names and emails typed into the users admin and the applicant-entered fields show escaped on the users page and the candidate page.
+  assert.ok((await admin.get('/app/admin/users')).text.includes('U &lt;script&gt;alert(1)&lt;/script&gt;'));
+  const cand = (await admin.get(`/app/applications/${app.id}`)).text;
+  assert.ok(cand.includes('Mail &lt;script&gt;alert(1)&lt;/script&gt;'), 'email subject in Activity');
+  assert.ok(cand.includes('Mail body &lt;script&gt;'), 'email body in Activity');
+  assert.ok(cand.includes('N &lt;script&gt;'), 'applicant name');
   // Validation re-render escapes too
   const err = await t.client().apply(role, { name: x, email: 'bad', sample_links: '' });
   assert.ok(!err.text.includes('<script>alert'));
   assert.ok(err.text.includes('value="&lt;script&gt;alert(1)&lt;/script&gt;"'));
 });
 
-test('AC-35: data and uploads survive a restart and migrations do not re-run', async () => {
+test('data survives a restart and migrations do not re-run', async () => {
   const role = await makeRole(t.db, { title: 'Persistent Role' });
-  await t.client().apply(role, { email: 'persist@example.com', name: 'Per Sist' }, { file: { name: 'keep.pdf', data: pdf(4096) } });
+  await t.client().apply(role, { email: 'persist@example.com', name: 'Per Sist', resume_url: 'https://example.com/keep' });
   const app = await lastApplication(t.db);
   // Remove one seeded template: if the seed migration re-ran, it would come back.
   await t.db.run("DELETE FROM email_templates WHERE name = 'Welcome aboard'");
@@ -333,9 +366,7 @@ test('AC-35: data and uploads survive a restart and migrations do not re-run', a
   const after = [];
   for (const tb of tables) after.push(await count(t.db, tb));
   assert.deepEqual(after, totals);
-  const file = await admin.get(`/app/applications/${app.id}/file`);
-  assert.equal(file.status, 200);
-  assert.equal(file.buffer.length, 4096);
   assert.match((await admin.get(`/app/applications/${app.id}`)).text, /Per Sist/);
+  assert.match((await admin.get(`/app/applications/${app.id}`)).text, /https:\/\/example\.com\/keep/);
 });
 });

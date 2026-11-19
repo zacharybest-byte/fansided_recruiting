@@ -2,79 +2,40 @@
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
-const { createFakeGoogle, googleSignIn } = require('./fake-google');
+const { composeUrl, applyMergeFields } = require('../src/lib/email');
+
+const unescapeHtml = (s) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const handoffHref = (text) => unescapeHtml(/<a href="([^"]*)" data-auto-open/.exec(text)[1]);
+
+test('composeUrl percent-encodes every value; Gmail uses %0A, mailto uses %0D%0A', () => {
+  const v = { to: 'a+b@example.com', subject: 'Re: A & B #1 é', body: 'Line one\nLine & two #3\r\né' };
+  assert.equal(
+    composeUrl('gmail', v),
+    'https://mail.google.com/mail/?view=cm&fs=1&to=a%2Bb%40example.com&su=Re%3A%20A%20%26%20B%20%231%20%C3%A9&body=Line%20one%0ALine%20%26%20two%20%233%0A%C3%A9'
+  );
+  assert.equal(
+    composeUrl('mailto', v),
+    'mailto:a%2Bb%40example.com?subject=Re%3A%20A%20%26%20B%20%231%20%C3%A9&body=Line%20one%0D%0ALine%20%26%20two%20%233%0D%0A%C3%A9'
+  );
+});
 
 for (const driver of DRIVERS) {
 
-function decodeMime(decoded) {
-  const [head, ...rest] = decoded.split('\r\n\r\n');
-  const headers = {};
-  for (const line of head.split('\r\n')) {
-    const i = line.indexOf(':');
-    headers[line.slice(0, i).toLowerCase()] = line.slice(i + 1).trim();
-  }
-  return { headers, body: Buffer.from(rest.join('\r\n\r\n').replace(/\r\n/g, ''), 'base64').toString('utf8') };
-}
-
-function decodeWord(v) {
-  const m = /^=\?UTF-8\?B\?(.+)\?=$/.exec(v);
-  return m ? Buffer.from(m[1], 'base64').toString('utf8') : v;
-}
-
-describe(`[${driver}] EMAIL_MODE=log`, () => {
+describe(`[${driver}] email composer`, () => {
   let t;
   let rep;
   let role;
+  let app;
   before(async () => {
     t = await startApp({ driver });
     rep = await makeUser(t.db, { email: 'rep@fansided.com', name: 'Rita Rep' });
     role = await makeRole(t.db, { title: 'Bears Writer', assigned: rep });
+    await t.client().apply(role, { name: 'Jamie Lynn Carter', email: 'jamie@example.com' });
+    app = await lastApplication(t.db);
   });
   after(() => t.close());
 
-  test('AC-12: a new application notifies the assigned rep; a failed send still saves the application', async () => {
-    await t.db.run('DELETE FROM dev_mail_log');
-    const res = await t.client().apply(role, { name: 'Nina Note', email: 'nina@example.com' });
-    assert.equal(res.status, 303);
-    const app = await lastApplication(t.db);
-    const mail = await t.db.all('SELECT * FROM dev_mail_log');
-    assert.equal(mail.length, 1);
-    assert.equal(mail[0].to_email, 'rep@fansided.com');
-    assert.equal(mail[0].from_email, 'rep@fansided.com'); // sent as the rep, to themselves
-    assert.equal(mail[0].subject, 'New application: Nina Note for Bears Writer');
-    assert.match(mail[0].body, new RegExp(`http://localhost/app/applications/${app.id}`));
-    assert.equal(await count(t.db, 'emails_sent'), 0); // notifications are not logged on the candidate
-
-    // Rep's send fails: falls back to the first active admin's account, still to the rep.
-    const deliver = t.app.mailer.deliver;
-    const attempts = [];
-    t.app.mailer.deliver = async (sender, msg) => {
-      attempts.push(sender.email);
-      if (sender.email === 'rep@fansided.com') throw new Error('no token');
-      return deliver(sender, msg);
-    };
-    await t.db.run('DELETE FROM dev_mail_log');
-    await t.client().apply(role, { email: 'fallback@example.com' });
-    assert.deepEqual(attempts, ['rep@fansided.com', 'admin@fansided.com']);
-    const fb = await t.db.get('SELECT * FROM dev_mail_log');
-    assert.equal(fb.from_email, 'admin@fansided.com');
-    assert.equal(fb.to_email, 'rep@fansided.com');
-
-    // Everything fails: application is still saved.
-    t.app.mailer.deliver = async () => {
-      throw new Error('Gmail is down');
-    };
-    const before = await count(t.db, 'applications');
-    const r = await t.client().apply(role, { email: 'stillsaved@example.com' });
-    assert.equal(r.status, 303);
-    assert.equal(r.headers.get('location'), '/thanks');
-    assert.equal(await count(t.db, 'applications'), before + 1);
-    t.app.mailer.deliver = deliver;
-  });
-
   test('AC-26: Load fills first_name, role_title and rep_name; unknown fields stay and warn', async () => {
-    await t.client().apply(role, { name: 'Jamie Lynn Carter', email: 'jamie@example.com' });
-    const app = await lastApplication(t.db);
     const tpl = (
       await t.db.run('INSERT INTO email_templates (name, subject, body, updated_at) VALUES (?, ?, ?, ?)', [
         'Merge test', 'Hi {{first_name}} re {{role_title}}', 'Dear {{ first_name }},\n{{role_title}} / {{rep_name}} / {{favourite_team}}', new Date().toISOString(),
@@ -83,49 +44,119 @@ describe(`[${driver}] EMAIL_MODE=log`, () => {
     const c = t.client();
     await c.login('rep@fansided.com');
     const page = await c.get(`/app/applications/${app.id}?template=${tpl}`);
-    assert.match(page.text, /name="subject" maxlength="300" value="Hi Jamie re Bears Writer"/);
+    assert.match(page.text, /name="subject" maxlength="200" value="Hi Jamie re Bears Writer"/);
     assert.match(page.text, /Dear Jamie,\nBears Writer \/ Rita Rep \/ \{\{favourite_team\}\}<\/textarea>/);
     assert.match(page.text, /id="merge-warning">Unknown merge field: \{\{favourite_team\}\}/);
     const clean = (await t.db.get("SELECT id FROM email_templates WHERE name = 'Trial invite'")).id;
     const page2 = await c.get(`/app/applications/${app.id}?template=${clean}`);
     assert.doesNotMatch(page2.text, /merge-warning/);
     assert.match(page2.text, /Next step: a trial for Bears Writer/);
+    assert.deepEqual(applyMergeFields('{{first_name}} {{nope}}', { first_name: 'A' }), { text: 'A {{nope}}', unknown: ['nope'] });
   });
 
-  test('AC-27 (log mode): sending logs subject, body, sender and time on the candidate; failures are logged and shown', async () => {
-    const app = await lastApplication(t.db);
-    const deliver = t.app.mailer.deliver;
+  test('the compose form opens in a new tab and has the two submit buttons; there is no send button and no recipient field', async () => {
+    const c = t.client();
+    await c.login('rep@fansided.com');
+    const page = await c.get(`/app/applications/${app.id}`);
+    const form = /<form method="post" action="\/app\/applications\/\d+\/email"[^>]*>[\s\S]*?<\/form>/.exec(page.text)[0];
+    assert.match(form, /target="_blank"/);
+    assert.match(form, /<button type="submit" name="via" value="gmail"[^>]*>Open in Gmail<\/button>/);
+    assert.match(form, /<button type="submit" name="via" value="mailto"[^>]*>Open in mail app<\/button>/);
+    assert.doesNotMatch(form, /name="(to|recipient|email)"/);
+    assert.doesNotMatch(page.text, />Send</);
+  });
+
+  test('AC-52: Open in Gmail logs one row and returns a hand-off page with the exactly encoded link; the recipient cannot be overridden', async () => {
     const c = t.client();
     await c.login('rep@fansided.com');
     await c.get(`/app/applications/${app.id}`);
-    const res = await c.post(`/app/applications/${app.id}/email`, { subject: 'Trial details', body: 'Line one\nLine two' });
-    assert.equal(res.status, 303);
-    const row = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC');
-    assert.equal(row.status, 'sent');
-    assert.equal(row.subject, 'Trial details');
-    assert.equal(row.body, 'Line one\nLine two');
+    const tplId = (await t.db.get("SELECT id FROM email_templates WHERE name = 'Trial invite'")).id;
+    const before = await count(t.db, 'emails_sent');
+    const res = await c.post(`/app/applications/${app.id}/email`, {
+      via: 'gmail',
+      template_id: tplId,
+      subject: 'Hello & welcome #1 é',
+      body: 'Line one\r\nTom & Jerry #2 100% é\nLast line',
+      to: 'evil@attacker.example', recipient: 'evil@attacker.example', to_email: 'evil@attacker.example',
+    });
+    assert.equal(res.status, 200, 'no redirect (form-action would block a cross-origin redirect)');
+    assert.equal(res.headers.get('location'), null);
+    assert.match(res.headers.get('cache-control'), /no-store/);
+    assert.match(res.text, /Email logged\. Opening Gmail…/);
+    assert.match(res.text, /data-auto-open/);
+    assert.equal(
+      handoffHref(res.text),
+      'https://mail.google.com/mail/?view=cm&fs=1&to=jamie%40example.com&su=Hello%20%26%20welcome%20%231%20%C3%A9&body=Line%20one%0ATom%20%26%20Jerry%20%232%20100%25%20%C3%A9%0ALast%20line'
+    );
+    assert.doesNotMatch(res.text, /attacker/);
+    assert.equal(await count(t.db, 'emails_sent'), before + 1);
+    const row = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC LIMIT 1');
+    assert.equal(row.person_id, app.person_id);
+    assert.equal(row.application_id, app.id);
+    assert.equal(row.role_id, role);
+    assert.equal(row.template_id, tplId);
     assert.equal(row.sender_user_id, rep);
     assert.equal(row.to_email, 'jamie@example.com');
+    assert.equal(row.subject, 'Hello & welcome #1 é');
+    assert.equal(row.body, 'Line one\nTom & Jerry #2 100% é\nLast line');
+    assert.equal(row.via, 'gmail');
     assert.ok(row.sent_at);
-    const page = await c.follow(res);
-    assert.match(page.text, /Email sent to jamie@example.com/);
-    assert.match(page.text, /<summary><strong>Trial details<\/strong> · Rita Rep · \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+    // Activity shows it with subject, rep, time, role tag and expandable body.
+    const act = await c.get(`/app/applications/${app.id}`);
+    const li = /<li class="email-gmail">[\s\S]*?<\/li>/.exec(act.text)[0];
+    assert.match(li, /<details>/);
+    assert.match(li, /Hello &amp; welcome #1 é/);
+    assert.match(li, /opened in Gmail/);
+    assert.match(li, /Rita Rep/);
+    assert.match(li, /<span class="tag">Bears Writer<\/span>/);
+    assert.match(li, /Tom &amp; Jerry #2 100% é/);
+  });
 
-    t.app.mailer.deliver = async () => {
-      throw new Error('invalid_grant');
-    };
-    await c.post(`/app/applications/${app.id}/email`, { subject: 'Will fail', body: 'x' });
-    const failed = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC');
-    assert.equal(failed.status, 'failed');
-    assert.match(failed.error, /invalid_grant/);
-    const after = await c.get(`/app/applications/${app.id}`);
-    assert.match(after.text, /Email not sent: please sign out and in again\./);
-    assert.match(after.text, /Will fail<\/strong>.*failed/);
-    t.app.mailer.deliver = deliver;
+  test('AC-52: Open in mail app does the same with a mailto: link (CRLF newlines) and via=mailto', async () => {
+    const c = t.client();
+    await c.login('rep@fansided.com');
+    await c.get(`/app/applications/${app.id}`);
+    const res = await c.post(`/app/applications/${app.id}/email`, { via: 'mailto', template_id: '', subject: 'Re: a&b', body: 'one\ntwo & #three é' });
+    assert.equal(res.status, 200);
+    assert.match(res.text, /Email logged\. Opening your mail app…/);
+    assert.equal(handoffHref(res.text), 'mailto:jamie%40example.com?subject=Re%3A%20a%26b&body=one%0D%0Atwo%20%26%20%23three%20%C3%A9');
+    const row = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC LIMIT 1');
+    assert.equal(row.via, 'mailto');
+    assert.equal(row.template_id, null);
+    assert.equal(row.to_email, 'jamie@example.com');
+    assert.match((await c.get(`/app/applications/${app.id}`)).text, /opened in mail app/);
+  });
+
+  test('invalid requests log nothing: no CSRF, unknown via, empty or over-long subject/body', async () => {
+    const c = t.client();
+    await c.login('rep@fansided.com');
+    await c.get(`/app/applications/${app.id}`);
+    const before = await count(t.db, 'emails_sent');
+    const url = `/app/applications/${app.id}/email`;
+    assert.equal((await c.post(url, { via: 'gmail', subject: 's', body: 'b' }, { csrf: null })).status, 403);
+    assert.equal((await c.post(url, { via: 'gmail', subject: 's', body: 'b' }, { csrf: 'f'.repeat(64) })).status, 403);
+    assert.equal((await c.post(url, { via: 'smtp', subject: 's', body: 'b' })).status, 400);
+    assert.equal((await c.post(url, { subject: 's', body: 'b' })).status, 400);
+    assert.equal((await c.post(url, { via: 'gmail', subject: '', body: 'b' })).status, 400);
+    assert.equal((await c.post(url, { via: 'gmail', subject: 's', body: '  ' })).status, 400);
+    assert.equal((await c.post(url, { via: 'gmail', subject: 's'.repeat(201), body: 'b' })).status, 400);
+    assert.equal((await c.post(url, { via: 'gmail', subject: 's', body: 'b'.repeat(4001) })).status, 400);
+    assert.equal((await c.post('/app/applications/abc/email', { via: 'gmail', subject: 's', body: 'b' })).status, 404);
+    assert.equal(await count(t.db, 'emails_sent'), before);
+    // The limits themselves are accepted.
+    assert.equal((await c.post(url, { via: 'gmail', subject: 's'.repeat(200), body: 'b'.repeat(4000) })).status, 200);
+    // Signed-out visitors are sent to login.
+    assert.equal((await t.client().post(url, { via: 'gmail', subject: 's', body: 'b' }, { csrf: null })).status, 302);
+  });
+
+  test('the external script follows the hand-off link only for Gmail compose or mailto URLs', async () => {
+    const js = await t.client().get('/public/app.js');
+    assert.match(js.text, /a\[data-auto-open\]/);
+    assert.match(js.text, /https:\/\/mail\.google\.com\/mail\/\?/);
+    assert.match(js.text, /window\.location\.replace\(target\)/);
   });
 
   test('AC-28: admin creates, edits and deletes templates; edits apply on next Load', async () => {
-    const app = await lastApplication(t.db);
     const a = t.client();
     await a.login('admin@fansided.com');
     await a.get('/app/admin/templates/new');
@@ -144,103 +175,25 @@ describe(`[${driver}] EMAIL_MODE=log`, () => {
     assert.match(page.text, />Version two<\/textarea>/);
     assert.match(page.text, /value="Following up again, Jamie"/);
 
+    // a logged email keeps its text and loses only the template link when the template is deleted
+    await a.get(`/app/applications/${app.id}`);
+    await a.post(`/app/applications/${app.id}/email`, { via: 'gmail', template_id: id, subject: 'from follow-up', body: 'x' });
     await a.get('/app/admin/templates');
     res = await a.post(`/app/admin/templates/${id}/delete`, {});
     assert.equal(res.status, 303);
     assert.equal(await count(t.db, 'email_templates', 'id = ?', id), 0);
+    assert.equal(await count(t.db, 'emails_sent', "subject = 'from follow-up' AND template_id IS NULL"), 1);
     page = await a.get(`/app/applications/${app.id}`);
     assert.doesNotMatch(page.text, /<option value="\d+">Follow-up<\/option>/);
 
-    // Validation
+    // Validation, including the 10,000 character template body limit
     await a.get('/app/admin/templates/new');
     res = await a.post('/app/admin/templates', { name: '', subject: '', body: '' });
     assert.equal(res.status, 400);
+    assert.equal((await a.post('/app/admin/templates', { name: 'Big', subject: 's', body: 'x'.repeat(10001) })).status, 400);
+    assert.equal((await a.post('/app/admin/templates', { name: 'Big', subject: 's'.repeat(201), body: 'x' })).status, 400);
+    assert.equal(await count(t.db, 'email_templates', "name = 'Big'"), 0);
   });
 });
 
-describe(`[${driver}] EMAIL_MODE=gmail against a fake Gmail API`, () => {
-  let t;
-  let fake;
-  let role;
-  before(async () => {
-    fake = createFakeGoogle();
-    t = await startApp({ driver,
-      env: { EMAIL_MODE: 'gmail', DEV_LOGIN: '0', GOOGLE_CLIENT_ID: 'cid', GOOGLE_CLIENT_SECRET: 'secret' },
-      fetchImpl: fake.fetch,
-    });
-    const rep = await makeUser(t.db, { email: 'rep@fansided.com', name: 'Rita Rep' });
-    role = await makeRole(t.db, { title: 'Équipe Writer', assigned: rep });
-    fake.addIdentity('admin', { email: 'admin@fansided.com', email_verified: true, name: 'Ada Admin', refresh_token: 'rt-admin' });
-    fake.addIdentity('rep', { email: 'rep@fansided.com', email_verified: true, name: 'Rita Rep', refresh_token: 'rt-rep' });
-  });
-  after(() => t.close());
-
-  test('AC-27 + AC-12 (gmail mode): sends as the signed-in rep via refresh token; revoked token is logged as failed; notifications fall back to admin', async () => {
-    const admin = t.client();
-    await googleSignIn(admin, 'admin');
-    const rep = t.client();
-    await googleSignIn(rep, 'rep');
-
-    // Notification: sent with the rep's own token, to the rep.
-    await t.client().apply(role, { name: 'Zoë Ångström', email: 'zoe@example.com' });
-    let sent = fake.sent[fake.sent.length - 1];
-    assert.equal(sent.accessToken, 'at-from-rt-rep');
-    let msg = decodeMime(sent.decoded);
-    assert.equal(msg.headers.to, 'rep@fansided.com');
-    assert.equal(decodeWord(msg.headers.subject), 'New application: Zoë Ångström for Équipe Writer');
-
-    const app = await lastApplication(t.db);
-    await rep.get(`/app/applications/${app.id}`);
-    const res = await rep.post(`/app/applications/${app.id}/email`, { subject: 'Café — trial', body: 'Hi Zoë,\nWelcome.' });
-    assert.equal(res.status, 303);
-    sent = fake.sent[fake.sent.length - 1];
-    assert.equal(sent.accessToken, 'at-from-rt-rep');
-    assert.ok(!/[+/=]/.test(sent.raw), 'raw must be base64url without padding');
-    msg = decodeMime(sent.decoded);
-    assert.equal(msg.headers.from, '"Rita Rep" <rep@fansided.com>');
-    assert.equal(msg.headers.to, 'zoe@example.com');
-    assert.equal(decodeWord(msg.headers.subject), 'Café — trial');
-    assert.equal(msg.headers['content-type'], 'text/plain; charset="UTF-8"');
-    assert.equal(msg.body, 'Hi Zoë,\r\nWelcome.');
-    assert.ok(sent.decoded.includes('\r\n'));
-    const row = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC');
-    assert.equal(row.status, 'sent');
-    assert.equal(row.gmail_message_id, `gmail-${fake.sent.length}`);
-
-    // Revoked token: logged as failed, rep is told, stored token cleared.
-    fake.revoked.add('rt-rep');
-    await rep.post(`/app/applications/${app.id}/email`, { subject: 'Second', body: 'x' });
-    const failed = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC');
-    assert.equal(failed.status, 'failed');
-    assert.match(failed.error, /invalid_grant/);
-    const page = await rep.get(`/app/applications/${app.id}`);
-    assert.match(page.text, /Email not sent: please sign out and in again\./);
-    assert.equal((await t.db.get("SELECT google_refresh_token_enc FROM users WHERE email = 'rep@fansided.com'")).google_refresh_token_enc, null);
-
-    // Notification now goes out with the admin's token, addressed to the rep.
-    const n = fake.sent.length;
-    await t.client().apply(role, { email: 'second@example.com' });
-    assert.equal(fake.sent.length, n + 1);
-    sent = fake.sent[fake.sent.length - 1];
-    assert.equal(sent.accessToken, 'at-from-rt-admin');
-    msg = decodeMime(sent.decoded);
-    assert.equal(msg.headers.to, 'rep@fansided.com');
-    assert.match(msg.headers.from, /admin@fansided.com/);
-
-    // Gmail API error (e.g. scope not granted) is also logged as failed.
-    fake.failSendFor.add('at-from-rt-admin');
-    await admin.get(`/app/applications/${app.id}`);
-    await admin.post(`/app/applications/${app.id}/email`, { subject: 'Third', body: 'y' });
-    const failed2 = await t.db.get('SELECT * FROM emails_sent ORDER BY id DESC');
-    assert.equal(failed2.status, 'failed');
-    assert.match(failed2.error, /Insufficient Permission/);
-
-    // Both tokens unusable: application still saved, nothing sent.
-    fake.revoked.add('rt-admin');
-    const before = await count(t.db, 'applications');
-    const r = await t.client().apply(role, { email: 'third@example.com' });
-    assert.equal(r.status, 303);
-    assert.equal(await count(t.db, 'applications'), before + 1);
-  });
-});
 }

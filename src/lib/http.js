@@ -1,7 +1,7 @@
 'use strict';
 // Request/response helpers, body reading with a hard size cap, and a small router.
 const { parseCookies, serializeCookie } = require('./cookies');
-const { parseMultipart } = require('./multipart');
+const { resolveBaseUrl } = require('./config');
 const { SafeHtml } = require('./render');
 
 class HttpError extends Error {
@@ -12,9 +12,8 @@ class HttpError extends Error {
 }
 
 class Form {
-  constructor(fields = new Map(), files = []) {
+  constructor(fields = new Map()) {
     this.fields = fields;
-    this.files = files;
   }
   get(name) {
     const v = this.fields.get(name);
@@ -26,10 +25,10 @@ class Form {
   has(name) {
     return this.fields.has(name);
   }
-  file(name) {
-    return this.files.find((f) => f.field === name && f.filename !== '') || null;
-  }
 }
+
+// One body cap for every POST.
+const MAX_BODY_BYTES = 512 * 1024;
 
 // Reads the whole body into memory, refusing anything over `limit` bytes with a 413.
 // Oversized bodies are drained (up to a bound) so the client can read the 413 response.
@@ -60,26 +59,17 @@ function readBody(req, limit) {
   });
 }
 
-async function readForm(req, limit) {
+// Only application/x-www-form-urlencoded is accepted (anything else is refused before the body is read).
+async function readForm(req, limit = MAX_BODY_BYTES) {
   const type = String(req.headers['content-type'] || '').toLowerCase();
+  if (!/^application\/x-www-form-urlencoded(\s*;|$)/.test(type)) throw new HttpError(415, 'Unsupported content type');
   const body = await readBody(req, limit);
-  if (type.startsWith('multipart/form-data')) {
-    try {
-      const { fields, files } = parseMultipart(body, req.headers['content-type']);
-      return new Form(fields, files);
-    } catch {
-      throw new HttpError(400, 'Malformed form data');
-    }
-  }
   const fields = new Map();
-  if (type.startsWith('application/x-www-form-urlencoded') || type === '') {
-    for (const [k, v] of new URLSearchParams(body.toString('utf8'))) {
-      if (!fields.has(k)) fields.set(k, []);
-      fields.get(k).push(v);
-    }
-    return new Form(fields, []);
+  for (const [k, v] of new URLSearchParams(body.toString('utf8'))) {
+    if (!fields.has(k)) fields.set(k, []);
+    fields.get(k).push(v);
   }
-  throw new HttpError(415, 'Unsupported content type');
+  return new Form(fields);
 }
 
 const SECURITY_HEADERS = {
@@ -125,6 +115,9 @@ function createContext(req, res, app) {
     },
     redirect(location, status = 303) {
       ctx.send(status, '', { Location: location });
+    },
+    baseUrl() {
+      return resolveBaseUrl(app.config, req);
     },
   };
   return ctx;
@@ -174,17 +167,18 @@ class Router {
   }
 }
 
-function clientIp(req, trustProxy) {
-  if (trustProxy > 0) {
-    const xff = String(req.headers['x-forwarded-for'] || '')
+// Client address for rate limits. `trustedHeader` (for example "x-forwarded-for" on Vercel) is only read when
+// the app is told to trust it; the right-most entry is used, because a proxy appends the address it saw and
+// anything to the left of that is client-supplied. Otherwise the socket address is used.
+function clientIp(req, trustedHeader) {
+  if (trustedHeader) {
+    const parts = String(req.headers[trustedHeader] || '')
       .split(',')
-      .map((s) => s.trim())
+      .map((x) => x.trim())
       .filter(Boolean);
-    // Each trusted proxy appends the address it saw, so with N trusted proxies the
-    // client address is the N-th entry from the right.
-    if (xff.length) return xff[Math.max(0, xff.length - trustProxy)];
+    if (parts.length) return parts[parts.length - 1].slice(0, 64);
   }
   return req.socket.remoteAddress || 'unknown';
 }
 
-module.exports = { HttpError, Form, readBody, readForm, createContext, Router, clientIp, SECURITY_HEADERS };
+module.exports = { HttpError, Form, MAX_BODY_BYTES, readBody, readForm, createContext, Router, clientIp, SECURITY_HEADERS };

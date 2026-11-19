@@ -48,7 +48,7 @@ describe('AC-36: both drivers', () => {
   test('node:sqlite is never loaded when the Turso driver is selected', () => {
     const script = `
       const { createApp } = require('./src/app');
-      createApp({ env: { TURSO_DATABASE_URL: 'http://127.0.0.1:1', TURSO_AUTH_TOKEN: 'x', QUIET: '1' } });
+      createApp({ env: { TURSO_DATABASE_URL: 'http://127.0.0.1:1', TURSO_AUTH_TOKEN: 'x' }, log: () => {} });
       console.log(process.moduleLoadList.filter((m) => /sqlite/i.test(m)).length);`;
     const out = execFileSync(process.execPath, ['-e', script], { cwd: ROOT, encoding: 'utf8' });
     assert.equal(out.trim(), '0');
@@ -565,10 +565,10 @@ for (const driver of DRIVERS) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// AC-11 / AC-40: the apply limit lives in the database
+// AC-11: the apply limit lives in the database
 // ---------------------------------------------------------------------------------------------
 for (const driver of DRIVERS) {
-  describe(`[${driver}] AC-11 / AC-40: apply rate limit survives the app being torn down and recreated`, () => {
+  describe(`[${driver}] AC-11: apply rate limit survives the app being torn down and recreated`, () => {
     test('10 stored applications per IP per hour; the 11th is refused, also after a restart; other IPs unaffected', async () => {
       let t = await startApp({ driver });
       try {

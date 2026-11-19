@@ -157,7 +157,7 @@ test('AC-23: moving to another role changes where it appears, logs role_change, 
   await c.get(`/app/applications/${id}`);
   await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing' });
   await c.post(`/app/applications/${id}/notes`, { body: 'Note before move' });
-  await c.post(`/app/applications/${id}/email`, { subject: 'Hello', body: 'Body before move' });
+  await c.post(`/app/applications/${id}/email`, { via: 'gmail', subject: 'Hello', body: 'Body before move' });
   const eventsBefore = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
 
   const res = await c.post(`/app/applications/${id}/role`, { role_id: String(roleB) });
@@ -191,7 +191,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   await c.get(`/app/applications/${first}`);
   await c.post(`/app/applications/${first}/stage`, { stage: 'passed' });
   await c.post(`/app/applications/${first}/notes`, { body: 'Good writer, wrong team' });
-  await c.post(`/app/applications/${first}/email`, { subject: 'Earlier email', body: 'Sent on the first application' });
+  await c.post(`/app/applications/${first}/email`, { via: 'gmail', subject: 'Earlier email', body: 'Sent on the first application' });
 
   const page1 = await c.get(`/app/applications/${first}`);
   assert.match(page1.text, /Rep Two · \d{4}-\d{2}-\d{2} \d{2}:\d{2}/); // author and time
@@ -213,7 +213,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   assert.ok(n.indexOf('Reapplied for B') < n.indexOf('Good writer, wrong team'));
 });
 
-test('AC-31: reassigning a role updates both dashboards and the next application notifies the new rep', async () => {
+test('AC-31: reassigning a role updates both dashboards', async () => {
   const role = await makeRole(t.db, { title: 'Reassign Me', assigned: rep1 });
   const c1 = t.client();
   await c1.login('rep1@fansided.com');
@@ -234,13 +234,5 @@ test('AC-31: reassigning a role updates both dashboards and the next application
   await c1.get(`/app/roles/${role}`);
   await c1.post(`/app/roles/${role}/assign`, { user_id: String(inactive) });
   assert.equal((await t.db.get('SELECT assigned_user_id FROM job_roles WHERE id = ?', [role])).assigned_user_id, rep2);
-
-  await t.db.run('DELETE FROM dev_mail_log');
-  await applyTo(role, 'afterreassign@example.com', 'After Reassign');
-  const mail = await t.db.all('SELECT * FROM dev_mail_log');
-  assert.equal(mail.length, 1);
-  assert.equal(mail[0].to_email, 'rep2@fansided.com');
-  assert.equal(mail[0].from_email, 'rep2@fansided.com');
-  assert.equal(mail[0].subject, 'New application: After Reassign for Reassign Me');
 });
 });

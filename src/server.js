@@ -10,23 +10,29 @@ function createHttpServer(handler) {
   return server;
 }
 
+// Outside production, prints the first-admin setup link while no admin has a password yet.
+async function logSetupLink(instance) {
+  const { config, db, log } = instance;
+  if (config.production || !config.adminEmail || !config.setupToken) return;
+  const row = await db.get("SELECT 1 AS x FROM users WHERE role = 'admin' AND active = 1 AND password_hash IS NOT NULL LIMIT 1");
+  if (row) return;
+  const base = config.baseUrl || `http://localhost:${config.port}`;
+  log(`First-admin setup link (development only): ${base}/setup?token=${encodeURIComponent(config.setupToken)}`);
+}
+
 if (require.main === module) {
-  let instance;
-  try {
-    instance = createApp();
-  } catch (err) {
-    console.error(`Startup failed: ${err.message}`);
+  const instance = createApp();
+  if (instance.configError) {
+    console.error(`Startup failed: ${instance.configError.message}`);
     process.exit(1);
   }
   const { config, log } = instance;
   const server = createHttpServer(instance.handler);
   instance.ready
+    .then(() => logSetupLink(instance))
     .then(() => {
       server.listen(config.port, () => {
         log(`FanSided Recruit listening on port ${server.address().port} (${config.production ? 'production' : 'development'}), database: ${config.tursoUrl ? 'turso' : `sqlite in ${config.dataDir}`}`);
-        if (config.devLogin) log('WARNING: DEV_LOGIN=1 is on: anyone can sign in as any allowlisted user.');
-        if (config.emailMode === 'log') log('EMAIL_MODE=log: emails are recorded in dev_mail_log, not sent.');
-        if (config.ephemeralTokenKey) log('No TOKEN_ENCRYPTION_KEY set: using a temporary key (stored Google tokens will not survive a restart).');
       });
     })
     .catch((err) => {
@@ -41,4 +47,4 @@ if (require.main === module) {
   process.on('SIGINT', shutdown);
 }
 
-module.exports = { createHttpServer };
+module.exports = { createHttpServer, logSetupLink };

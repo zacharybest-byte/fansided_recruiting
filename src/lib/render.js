@@ -35,21 +35,21 @@ function raw(value) {
   return new SafeHtml(String(value));
 }
 
-function isHttpUrl(value) {
+// Only https URLs are ever rendered as links.
+function isHttpsUrl(value) {
   try {
-    const u = new URL(String(value).trim());
-    return u.protocol === 'http:' || u.protocol === 'https:';
+    return new URL(String(value).trim()).protocol === 'https:';
   } catch {
     return false;
   }
 }
 
-// Render a URL as a link only when it is http(s); otherwise as plain text.
+// Render a URL as a link only when it parses and is https; otherwise as plain text.
 function link(url, text) {
   const value = String(url || '').trim();
   if (!value) return html``;
-  if (!isHttpUrl(value)) return html`${value}`;
-  return html`<a href="${value}" rel="noopener noreferrer nofollow" target="_blank">${text || value}</a>`;
+  if (!isHttpsUrl(value)) return html`${value}`;
+  return html`<a href="${value}" rel="noopener noreferrer" target="_blank">${text || value}</a>`;
 }
 
 // Plain text with newlines kept (CSS uses white-space: pre-wrap on .pre).
@@ -64,4 +64,4 @@ function checked(cond) {
   return cond ? raw(' checked') : '';
 }
 
-module.exports = { html, raw, escapeHtml, SafeHtml, link, multiline, isHttpUrl, selected, checked };
+module.exports = { html, raw, escapeHtml, SafeHtml, link, multiline, isHttpsUrl, selected, checked };

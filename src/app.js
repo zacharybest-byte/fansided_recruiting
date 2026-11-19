@@ -1,16 +1,15 @@
 'use strict';
-// Builds the application: config, database, mailer, routes and the request handler.
+// Builds the application: config, database, routes and the request handler.
 // createApp() is synchronous and cheap; the database is opened and migrated lazily on the first request
 // (or when `ready` is read), which makes the handler safe to call on a serverless cold start.
 const fs = require('node:fs');
 const path = require('node:path');
-const { loadConfig } = require('./lib/config');
-const { openDb, migrate, nowIso } = require('./lib/db');
+const { loadConfig, ConfigError } = require('./lib/config');
+const { openDb, migrate } = require('./lib/db');
 const { createContext, Router, HttpError, clientIp, SECURITY_HEADERS } = require('./lib/http');
 const { loadSession, requireAdmin } = require('./lib/auth');
 const { errorPage } = require('./lib/layout');
-const { createGoogle } = require('./lib/google');
-const { createMailer } = require('./lib/email');
+const { dummyHash } = require('./lib/password');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const STATIC_TYPES = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.png': 'image/png' };
@@ -24,35 +23,45 @@ function loadStatic() {
   return files;
 }
 
-// One batch; an unchanged admin row is not written.
-async function bootstrapAdmins(db, emails) {
-  if (!emails.length) return;
-  const now = nowIso();
-  await db.batch(
-    emails.map((email) => ({
-      sql: `INSERT INTO users (email, name, role, active, created_at) VALUES (?, '', 'admin', 1, ?)
-            ON CONFLICT(email) DO UPDATE SET role = 'admin', active = 1 WHERE role != 'admin' OR active != 1`,
-      args: [email, now],
-    }))
-  );
+const GENERIC_500 = '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Something went wrong</title></head><body><h1>Something went wrong</h1><p>The service is not available right now. Please try again later.</p></body></html>';
+
+// Unusable configuration (production without its required variables): the app still returns a handler, which
+// answers every request with a generic 500, and the variable NAMES are logged. server.js exits 1 on `configError`.
+function brokenApp(err, options) {
+  const log = options.log || ((msg) => console.log(`${new Date().toISOString()} ${msg}`));
+  log(`[config] ${err.message}`);
+  return {
+    configError: err,
+    handler(req, res) {
+      const body = Buffer.from(GENERIC_500);
+      res.writeHead(500, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store' });
+      res.end(req.method === 'HEAD' ? undefined : body);
+    },
+    get ready() {
+      return Promise.reject(err);
+    },
+    async close() {},
+    log,
+  };
 }
 
-// options: { env, log, db, dataDir, fetchImpl (outgoing Google calls), tursoFetchImpl (Turso driver) }
+// options: { env, log, db, dataDir, fetchImpl (outgoing webhook call), tursoFetchImpl (Turso driver),
+//            trustedIpHeader (request header carrying the client IP; default x-forwarded-for on Vercel, else none) }
 function createApp(options = {}) {
-  const config = loadConfig(options.env || process.env);
+  let config;
+  try {
+    config = loadConfig(options.env || process.env);
+  } catch (err) {
+    if (err instanceof ConfigError) return brokenApp(err, options);
+    throw err;
+  }
   if (options.dataDir) config.dataDir = path.resolve(options.dataDir);
-  const log = options.log || (config.quiet ? () => {} : (msg) => console.log(`${new Date().toISOString()} ${msg}`));
+  const log = options.log || ((msg) => console.log(`${new Date().toISOString()} ${msg}`));
+  for (const w of config.warnings) log(`[config] warning: ${w}`);
+  const trustedIpHeader = options.trustedIpHeader !== undefined ? options.trustedIpHeader : config.vercel ? 'x-forwarded-for' : null;
   const ownsDb = !options.db;
   const db = options.db || openDb(config, { fetchImpl: options.tursoFetchImpl });
-
-  const google = createGoogle({
-    clientId: config.googleClientId,
-    clientSecret: config.googleClientSecret,
-    redirectUri: `${config.baseUrl}/auth/google/callback`,
-    fetchImpl: options.fetchImpl,
-  });
-  const app = { config, db, google, log };
-  app.mailer = createMailer({ db, config, google, log });
+  const app = { config, db, log, fetchImpl: options.fetchImpl };
 
   const router = new Router();
   require('./routes/public').register(router);
@@ -62,18 +71,13 @@ function createApp(options = {}) {
   require('./routes/admin').register(router);
   const staticFiles = loadStatic();
 
-  // Init runs once per instance (migrations, bootstrap admins); a failure is retried on the next request.
+  // Init runs once per instance (migrations, dummy password hash); a failure is retried on the next request.
   let initPromise = null;
   function ensureReady() {
     if (!initPromise) {
       initPromise = (async () => {
-        try {
-          fs.mkdirSync(path.join(config.dataDir, 'uploads'), { recursive: true });
-        } catch {
-          /* read-only file system: uploads are removed in v2 anyway */
-        }
         await migrate(db);
-        await bootstrapAdmins(db, config.adminEmails);
+        await dummyHash();
       })().catch((err) => {
         initPromise = null;
         throw err;
@@ -84,7 +88,7 @@ function createApp(options = {}) {
 
   async function handle(req, res) {
     const ctx = createContext(req, res, app);
-    ctx.ip = clientIp(req, config.trustProxy);
+    ctx.ip = clientIp(req, trustedIpHeader);
     try {
       const file = staticFiles.get(ctx.path);
       if (file && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
@@ -111,10 +115,8 @@ function createApp(options = {}) {
       if (status === 500) log(`[error] ${ctx.method} ${ctx.path}: ${err.stack || err}`);
       if (res.headersSent) return res.destroy();
       let message = status === 500 ? 'Please try again. If it keeps happening, tell an admin.' : err.message;
-      if (status === 413) {
-        message = `The upload is too large. Files must be at most ${config.maxUploadMb} MB. Please go back and choose a smaller file.`;
-        res.setHeader('Connection', 'close');
-      }
+      if (status === 413) message = 'That request was too large (the limit is 512 KB).';
+      if (status === 413 || status === 415) res.setHeader('Connection', 'close');
       try {
         errorPage(ctx, status, message);
       } catch (renderErr) {

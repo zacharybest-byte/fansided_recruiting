@@ -6,6 +6,15 @@
   var summary = document.getElementById('error-summary');
   if (summary) summary.focus();
 
+  // Email hand-off page: follow the Gmail / mailto link on its own. Without JS the user clicks the link.
+  var handoff = document.querySelector('a[data-auto-open]');
+  if (handoff) {
+    var target = handoff.getAttribute('href') || '';
+    if (target.indexOf('https://mail.google.com/mail/?') === 0 || target.indexOf('mailto:') === 0) {
+      window.location.replace(target);
+    }
+  }
+
   // Ask before destructive actions.
   document.addEventListener('submit', function (e) {
     var btn = e.submitter;

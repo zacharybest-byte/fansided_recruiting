@@ -7,6 +7,7 @@ const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
 const { nowIso } = require('../lib/db');
 const { MERGE_FIELDS } = require('../lib/email');
+const { randomToken, sha256Hex } = require('../lib/crypto');
 const { idParam } = require('./dashboard');
 
 const MAX_QUESTIONS = 5;
@@ -49,8 +50,8 @@ function templateForm(ctx, t, { errors = {}, status = 200 } = {}) {
       <form method="post" action="${isNew ? '/app/admin/templates' : `/app/admin/templates/${t.id}`}" class="stacked">
         ${csrfField(ctx)}
         <label>Name <input type="text" name="name" maxlength="200" value="${t.name || ''}" required></label>${fieldError(errors, 'name')}
-        <label>Subject <input type="text" name="subject" maxlength="300" value="${t.subject || ''}" required></label>${fieldError(errors, 'subject')}
-        <label>Body (plain text) <textarea name="body" rows="12" maxlength="20000" required>${t.body || ''}</textarea></label>${fieldError(errors, 'body')}
+        <label>Subject <input type="text" name="subject" maxlength="200" value="${t.subject || ''}" required></label>${fieldError(errors, 'subject')}
+        <label>Body (plain text) <textarea name="body" rows="12" maxlength="10000" required>${t.body || ''}</textarea></label>${fieldError(errors, 'body')}
         <p><button type="submit" class="primary">Save</button></p>
       </form>
       ${mergeFieldHelp()}`,
@@ -65,8 +66,8 @@ function readTemplate(form) {
   };
   const errors = {};
   if (!t.name || t.name.length > 200) errors.name = 'Name is required (up to 200 characters).';
-  if (!t.subject || t.subject.length > 300) errors.subject = 'Subject is required (up to 300 characters).';
-  if (!t.body || t.body.length > 20000) errors.body = 'Body is required (up to 20,000 characters).';
+  if (!t.subject || t.subject.length > 200) errors.subject = 'Subject is required (up to 200 characters).';
+  if (!t.body || t.body.length > 10000) errors.body = 'Body is required (up to 10,000 characters).';
   return { t, errors };
 }
 
@@ -185,18 +186,34 @@ async function checkAssignee(db, r, errors, previousId) {
 
 // ---------- Users ----------
 
-async function activeAdminCount(db) {
-  return (await db.get("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1")).n;
+const INVITE_DAYS = 7;
+const RESET_HOURS = 24;
+
+// A link is shown once, in the response to the POST that created it. Only its SHA-256 is stored.
+function newLink(ctx, kind, token) {
+  const base = ctx.baseUrl();
+  return { kind, url: `${base}/set-password?token=${token}`, relative: !base };
 }
 
-async function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
+async function usersPage(ctx, { errors = {}, values = {}, status = 200, link = null, linkEmail = '' } = {}) {
   const users = await ctx.app.db.all(
-    'SELECT u.*, (SELECT COUNT(*) FROM job_roles r WHERE r.assigned_user_id = u.id) AS role_count FROM users u ORDER BY u.active DESC, u.name COLLATE NOCASE, u.email'
+    `SELECT u.id, u.email, u.name, u.role, u.active, (u.password_hash IS NOT NULL) AS has_password,
+            (SELECT COUNT(*) FROM job_roles r WHERE r.assigned_user_id = u.id) AS role_count
+       FROM users u ORDER BY u.active DESC, u.name COLLATE NOCASE, u.email`
   );
+  const statusOf = (u) => (!u.active ? 'Deactivated' : u.has_password ? 'Active' : 'Invite pending');
   page(ctx, {
     title: 'Users',
     status,
     body: html`<h1>Users</h1>
+      ${link
+        ? html`<section class="card" id="new-link">
+            <h2>${link.kind === 'invite' ? 'Invite link' : 'Password reset link'} for ${linkEmail}</h2>
+            <p><strong>Copy this link now and send it to them. It is shown only once</strong> and works once
+              (${link.kind === 'invite' ? `${INVITE_DAYS} days` : `${RESET_HOURS} hours`}).${link.relative ? ' BASE_URL is not set: put your site address in front of it.' : ''}</p>
+            <p><input type="text" readonly id="link-url" class="wide" value="${link.url}" aria-label="Link" size="80"></p>
+          </section>`
+        : ''}
       <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th></th></tr></thead><tbody>
         ${users.map(
           (u) => html`<tr class="${u.active ? '' : 'inactive'}" data-user-id="${u.id}">
@@ -209,18 +226,20 @@ async function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
                 <option value="rep"${u.role === 'rep' ? raw(' selected') : ''}>Rep</option>
                 <option value="admin"${u.role === 'admin' ? raw(' selected') : ''}>Admin</option>
               </select> <button type="submit">Change</button></form></td>
-            <td>${u.active ? 'Active' : 'Deactivated'}</td>
+            <td class="status-cell">${statusOf(u)}</td>
             <td class="num">${u.role_count}</td>
             <td>${u.active
-              ? html`<form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link danger" data-confirm="Deactivate ${u.name || u.email}? They will be signed out and can no longer sign in.">Deactivate</button></form>`
+              ? html`<form method="post" action="/app/admin/users/${u.id}/reset-link" class="inline">${csrfField(ctx)}<button type="submit" class="link">${u.has_password ? 'Create reset link' : 'New invite link'}</button></form>
+                 <form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link danger" data-confirm="Deactivate ${u.name || u.email}? They will be signed out and can no longer sign in.">Deactivate</button></form>`
               : html`<form method="post" action="/app/admin/users/${u.id}/reactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link">Reactivate</button></form>`}</td>
           </tr>`
         )}
       </tbody></table></div>
       <h2>Add a user</h2>
+      <p class="muted">You get a single-use invite link to send to them. They choose their own password.</p>
       <form method="post" action="/app/admin/users" class="stacked narrow">
         ${csrfField(ctx)}
-        <label>Email (their Google account) <input type="email" name="email" maxlength="254" value="${values.email || ''}" required></label>${fieldError(errors, 'email')}
+        <label>Email <input type="email" name="email" maxlength="254" value="${values.email || ''}" required></label>${fieldError(errors, 'email')}
         <label>Name <input type="text" name="name" maxlength="200" value="${values.name || ''}" required></label>${fieldError(errors, 'name')}
         <label>Role
           <select name="role">
@@ -234,13 +253,26 @@ async function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
 }
 
 async function getUser(db, id) {
-  const u = await db.get('SELECT * FROM users WHERE id = ?', [idParam(id)]);
+  const u = await db.get('SELECT id, email, name, role, active, (password_hash IS NOT NULL) AS has_password FROM users WHERE id = ?', [idParam(id)]);
   if (!u) throw new HttpError(404, 'User not found');
   return u;
 }
 
-// A user row that may not lose its active admin status when it is the last one (checked inside the SQL).
-const NOT_LAST_ADMIN = "(role != 'admin' OR active = 0 OR (SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1) > 1)";
+// SQL guard on the users row being changed: it must not be the last active admin that has a password
+// (checked inside the statement, so a race cannot remove the last admin who can sign in).
+const NOT_LAST_ADMIN = `(role != 'admin' OR active = 0 OR password_hash IS NULL
+  OR EXISTS (SELECT 1 FROM users o WHERE o.id != users.id AND o.role = 'admin' AND o.active = 1 AND o.password_hash IS NOT NULL))`;
+
+// Statement that stores a link token (only its SHA-256) for the user selected by `where`.
+function insertToken(kind, token, actorId, where, whereArgs) {
+  const now = new Date();
+  const expires = new Date(now.getTime() + (kind === 'invite' ? INVITE_DAYS * 86400000 : RESET_HOURS * 3600000)).toISOString();
+  return {
+    sql: `INSERT INTO auth_tokens (user_id, kind, token_hash, expires_at, created_by_user_id, created_at)
+          SELECT id, ?, ?, ?, ?, ? FROM users WHERE ${where}`,
+    args: [kind, sha256Hex(token), expires, actorId, now.toISOString(), ...whereArgs],
+  };
+}
 
 function register(router) {
   const A = [requireAdmin];
@@ -309,16 +341,50 @@ function register(router) {
   // Users
   router.get('/app/admin/users', ...A, (ctx) => usersPage(ctx));
   router.post('/app/admin/users', ...AP, async (ctx) => {
-    const { db } = ctx.app;
-    const values = { email: normaliseEmail(ctx.form.get('email')), name: ctx.form.get('name').trim(), role: ctx.form.get('role') === 'admin' ? 'admin' : 'rep' };
+    const { db, log } = ctx.app;
+    const values = { email: normaliseEmail(ctx.form.get('email')), name: ctx.form.get('name').replace(/\s+/g, ' ').trim(), role: ctx.form.get('role') === 'admin' ? 'admin' : 'rep' };
     const errors = {};
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email) || values.email.length > 254) errors.email = 'Enter a valid email address.';
     else if (await db.get('SELECT id FROM users WHERE email = ?', [values.email])) errors.email = 'A user with this email already exists.';
     if (!values.name || values.name.length > 200) errors.name = 'Name is required (up to 200 characters).';
     if (Object.keys(errors).length) return usersPage(ctx, { errors, values, status: 400 });
-    await db.run('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, 1, ?)', [values.email, values.name, values.role, nowIso()]);
-    setFlash(ctx, 'ok', `Added ${values.email}.`);
-    ctx.redirect('/app/admin/users');
+    const token = randomToken();
+    const now = nowIso();
+    let results;
+    try {
+      // One batch: the user (no password yet) and its invite token.
+      results = await db.batch([
+        { sql: 'INSERT INTO users (email, name, role, active, password_hash, created_at) VALUES (?, ?, ?, 1, NULL, ?)', args: [values.email, values.name, values.role, now] },
+        insertToken('invite', token, ctx.user.id, 'email = ?', [values.email]),
+      ]);
+    } catch (err) {
+      if (/UNIQUE|constraint/i.test(String(err.message))) return usersPage(ctx, { errors: { email: 'A user with this email already exists.' }, values, status: 400 });
+      throw err;
+    }
+    log(`[admin] invite created user=${results[0].lastInsertRowid} by=${ctx.user.id}`);
+    // Rendered directly (never put in a redirect URL); the link exists only in this response.
+    await usersPage(ctx, { link: newLink(ctx, 'invite', token), linkEmail: values.email });
+  });
+  router.post('/app/admin/users/:id/reset-link', ...AP, async (ctx) => {
+    const { db, log } = ctx.app;
+    const u = await getUser(db, ctx.params.id);
+    if (!u.active) {
+      setFlash(ctx, 'error', 'This user is deactivated. Reactivate them first.');
+      return ctx.redirect('/app/admin/users');
+    }
+    const kind = u.has_password ? 'reset' : 'invite';
+    const token = randomToken();
+    // One batch: earlier unused links of this user are deleted, the new one is stored (both only while active).
+    const results = await db.batch([
+      { sql: 'DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 1)', args: [u.id, u.id] },
+      insertToken(kind, token, ctx.user.id, 'id = ? AND active = 1', [u.id]),
+    ]);
+    if (results[1].changes !== 1) {
+      setFlash(ctx, 'error', 'This user is deactivated. Reactivate them first.');
+      return ctx.redirect('/app/admin/users');
+    }
+    log(`[admin] ${kind} link created user=${u.id} by=${ctx.user.id}`);
+    await usersPage(ctx, { link: newLink(ctx, kind, token), linkEmail: u.email });
   });
   router.post('/app/admin/users/:id/name', ...AP, async (ctx) => {
     const { db } = ctx.app;
@@ -337,12 +403,12 @@ function register(router) {
     const u = await getUser(db, ctx.params.id);
     const role = ctx.form.get('role') === 'admin' ? 'admin' : 'rep';
     if (role === u.role) return ctx.redirect('/app/admin/users');
-    if (u.role === 'admin' && u.active && (await activeAdminCount(db)) <= 1) {
-      setFlash(ctx, 'error', 'You cannot remove the last active admin.');
+    if (u.id === ctx.user.id && role !== 'admin') {
+      setFlash(ctx, 'error', 'You cannot change your own role.');
       return ctx.redirect('/app/admin/users');
     }
-    // The last-admin rule is repeated inside the UPDATE so a race cannot remove the last admin.
-    const r = await db.run(`UPDATE users SET role = ? WHERE id = ? AND (? = 'admin' OR ${NOT_LAST_ADMIN})`, [role, u.id, role]);
+    // Demoting is guarded inside the UPDATE: not yourself, never the last active admin who has a password.
+    const r = await db.run(`UPDATE users SET role = ? WHERE id = ? AND (? = 'admin' OR (id != ? AND ${NOT_LAST_ADMIN}))`, [role, u.id, role, ctx.user.id]);
     if (r.changes === 0) setFlash(ctx, 'error', 'You cannot remove the last active admin.');
     else setFlash(ctx, 'ok', `${u.email} is now ${role === 'admin' ? 'an admin' : 'a rep'}.`);
     ctx.redirect('/app/admin/users');
@@ -354,10 +420,6 @@ function register(router) {
       setFlash(ctx, 'error', 'You cannot deactivate yourself.');
       return ctx.redirect('/app/admin/users');
     }
-    if (u.role === 'admin' && u.active && (await activeAdminCount(db)) <= 1) {
-      setFlash(ctx, 'error', 'You cannot deactivate the last active admin.');
-      return ctx.redirect('/app/admin/users');
-    }
     const roles = await db.all('SELECT id, title, status FROM job_roles WHERE assigned_user_id = ? ORDER BY title', [u.id]);
     if (roles.length && ctx.form.get('confirm') !== '1') {
       return page(ctx, {
@@ -365,18 +427,19 @@ function register(router) {
         body: html`<h1>Deactivate ${u.name || u.email}?</h1>
           <p class="flash flash-error">Warning: ${u.name || u.email} is still the assigned rep for ${roles.length} role${roles.length === 1 ? '' : 's'}:</p>
           <ul>${roles.map((r) => html`<li><a href="/app/roles/${r.id}">${r.title}</a>${r.status === 'closed' ? ' (closed)' : ''}</li>`)}</ul>
-          <p>New-application notifications for these roles will go to the first active admin until you reassign them.</p>
+          <p>Reassign these roles after deactivating.</p>
           <form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">
             ${csrfField(ctx)}<input type="hidden" name="confirm" value="1">
             <button type="submit" class="danger">Deactivate anyway</button> <a href="/app/admin/users">Cancel</a>
           </form>`,
       });
     }
-    // One atomic batch: the last-admin guard is inside the UPDATE, and sessions are only removed once
-    // the user is really inactive.
+    // One atomic batch. The last-admin and not-yourself guards are inside the UPDATE; sessions and unused
+    // links are only removed once the user really is inactive.
     const results = await db.batch([
-      { sql: `UPDATE users SET active = 0 WHERE id = ? AND ${NOT_LAST_ADMIN}`, args: [u.id] },
+      { sql: `UPDATE users SET active = 0 WHERE id = ? AND id != ? AND ${NOT_LAST_ADMIN}`, args: [u.id, ctx.user.id] },
       { sql: 'DELETE FROM sessions WHERE user_id = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 0)', args: [u.id, u.id] },
+      { sql: 'DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 0)', args: [u.id, u.id] },
     ]);
     if (results[0].changes === 0) setFlash(ctx, 'error', 'You cannot deactivate the last active admin.');
     else setFlash(ctx, 'ok', `${u.email} deactivated.`);
