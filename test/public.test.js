@@ -139,7 +139,7 @@ test('AC-06: valid submission creates one New application with one system stage_
   assert.equal(events.length, 1);
   assert.equal(events[0].type, 'stage_change');
   assert.equal(events[0].from_value, null);
-  assert.equal(events[0].to_value, 'new');
+  assert.equal(events[0].to_value, 'New');
   assert.equal(events[0].actor_user_id, null);
   const thanks = await c.follow(res);
   assert.equal(thanks.status, 200);

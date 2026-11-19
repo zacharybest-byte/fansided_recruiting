@@ -344,13 +344,14 @@ async function applySubmit(ctx) {
       args: [clean.email, clean.name, clean.linkedin_url, now, now, ...guard.args],
     },
     {
-      sql: `INSERT INTO applications (person_id, role_id, applicant_name, applicant_linkedin, stage, sample_links, resume_url, answers_json,
+      sql: `INSERT INTO applications (person_id, role_id, applicant_name, applicant_linkedin, stage, stage_id, sample_links, resume_url, answers_json,
               heard_from, source_tag, applied_at, stage_changed_at)
-            SELECT id, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ? AND ${guard.sql}`,
+            SELECT id, ?, ?, ?, 'new', (SELECT s.id FROM role_stages s WHERE s.role_id = ? AND s.kind = 'new' ORDER BY s.position LIMIT 1), ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ? AND ${guard.sql}`,
       args: [
         role.id,
         clean.name,
         clean.linkedin_url,
+        role.id,
         clean.sample_links,
         clean.resume_url,
         JSON.stringify(clean.answers),
@@ -364,7 +365,7 @@ async function applySubmit(ctx) {
     },
     {
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
-            SELECT last_insert_rowid(), 'stage_change', NULL, 'new', NULL, ? WHERE ${guard.sql}`,
+            SELECT last_insert_rowid(), 'stage_change', NULL, 'New', NULL, ? WHERE ${guard.sql}`,
       args: [now, ...guard.args],
     },
     pruneStatement(),

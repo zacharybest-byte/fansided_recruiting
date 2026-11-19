@@ -102,9 +102,9 @@ describe('AC-41: Vercel entry', () => {
     assert.deepEqual(fs.readdirSync(path.join(ROOT, 'public')).filter((f) => f !== 'fonts').sort(), ['app.js', 'favicon.svg', 'logo.png', 'style.css']);
   });
 
-  test('package.json: 2.0.0, node 22.x, no dependencies, scripts start/dev/test only', () => {
+  test('package.json: 2.2.0, node 22.x, no dependencies, scripts start/dev/test only', () => {
     const pkg = JSON.parse(read('package.json'));
-    assert.equal(pkg.version, '2.0.0');
+    assert.equal(pkg.version, '2.2.0');
     assert.equal(pkg.engines.node, '22.x');
     assert.equal(pkg.main, 'api/index.js');
     assert.equal(pkg.dependencies, undefined);
@@ -326,9 +326,18 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 6);
       assert.equal(await count(t.db, 'people', 'is_sample = 1'), 18);
       assert.equal(await count(t.db, 'people', "is_sample = 1 AND email LIKE '%@sample.invalid' AND name NOT LIKE '%(demo)%' AND name NOT LIKE 'Sample%'"), 18);
+      // legacy column holds the CATEGORY; stage_id points at a stage of the application's own role
       const stages = await t.db.all('SELECT DISTINCT stage FROM applications ORDER BY stage');
-      assert.deepEqual(stages.map((s) => s.stage).filter((s) => s !== 'new').sort(), ['onboarded', 'passed', 'reviewing', 'trial']);
+      assert.deepEqual(stages.map((s) => s.stage).filter((s) => s !== 'new').sort(), ['onboarded', 'passed', 'reviewing']);
       assert.ok(stages.some((s) => s.stage === 'new'));
+      assert.equal(await count(t.db, 'applications a JOIN role_stages s ON s.id = a.stage_id AND s.role_id = a.role_id'), await count(t.db, 'applications'));
+      const names = (await t.db.all("SELECT DISTINCT s.name FROM applications a JOIN role_stages s ON s.id = a.stage_id WHERE a.person_id IN (SELECT id FROM people WHERE is_sample = 1) ORDER BY s.name")).map((r) => r.name);
+      assert.deepEqual(names, ['Edit test', 'New', 'Onboarded', 'Passed', 'Phone screen', 'Reviewing', 'Trial']);
+      // two of the six sample roles have their own workflow
+      const flows = (await t.db.all("SELECT r.title, group_concat(s.name, ' > ') AS flow FROM job_roles r JOIN role_stages s ON s.role_id = r.id WHERE r.is_sample = 1 GROUP BY r.id ORDER BY r.id")).map((r) => r.flow);
+      assert.equal(flows.filter((f) => f === 'New > Reviewing > Trial > Onboarded > Passed').length, 4);
+      assert.ok(flows.includes('New > Reviewing > Edit test > Trial > Onboarded > Passed'));
+      assert.ok(flows.includes('New > Phone screen > Trial > Onboarded > Passed'));
       assert.equal(await count(t.db, 'job_roles', 'is_sample = 1 AND assigned_user_id = (SELECT id FROM users WHERE email = ?)', 'admin@fansided.com'), 6);
       assert.equal(await count(t.db, 'notes', 'person_id IN (SELECT id FROM people WHERE is_sample = 1)'), 4);
       assert.ok((await count(t.db, 'application_events', "type = 'stage_change'")) >= 18 + 12);
@@ -371,6 +380,8 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       assert.equal(await count(t.db, 'applications'), before.apps + 1);
       assert.equal(await count(t.db, 'application_events'), before.events + 1);
       assert.ok(await t.db.get('SELECT id FROM people WHERE email = ?', ['real@fansided-test.com']));
+      assert.equal(await count(t.db, 'role_stages', 'role_id NOT IN (SELECT id FROM job_roles)'), 0, 'no orphan stages after removal');
+      assert.equal(await count(t.db, 'role_stages', 'role_id = ?', keepRole), 5, 'the kept role keeps its workflow');
       // can be loaded again after removal
       await admin.get('/app/admin/sample');
       await admin.post('/app/admin/sample/load');

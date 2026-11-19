@@ -181,7 +181,72 @@ const MIGRATIONS = [
       }));
     },
   },
+  { version: 3, name: 'per-role workflows (role_stages, applications.stage_id, backfill, triggers)', statements: () => workflowMigration() },
 ];
+
+
+// Migration 3 (v2.2.0): per-role workflows. ADDITIVE ONLY: one new table, one new nullable column, indexes, a backfill
+// and two triggers. Nothing existing is rebuilt, dropped, renamed or rewritten except by filling the new column.
+// Every role gets the five stages the app has always had (New, Reviewing, Trial, Onboarded, Passed) and every
+// application is pointed at the matching stage of its own role, so the board looks exactly as it did.
+// The legacy applications.stage column (CHECK-limited to the five old values) is left alone and keeps being written
+// as the stage's category. Two triggers keep stage_id consistent for any writer that only knows about that column
+// (an older deployment still running during a rollout).
+const STAGE_ID_FROM_LEGACY = `(SELECT s.id FROM role_stages s WHERE s.role_id = NEW.role_id AND s.kind =
+    CASE WHEN NEW.stage IN ('reviewing', 'trial') THEN 'progress' ELSE NEW.stage END
+  ORDER BY CASE WHEN lower(s.name) = NEW.stage THEN 0 ELSE 1 END, s.position, s.id LIMIT 1)`;
+
+function workflowMigration() {
+  const now = nowIso();
+  return [
+    `CREATE TABLE role_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('new','progress','onboarded','passed')),
+    created_at TEXT NOT NULL
+  )`,
+    'CREATE INDEX role_stages_role ON role_stages(role_id, position)',
+    'ALTER TABLE applications ADD COLUMN stage_id INTEGER',
+    'CREATE INDEX applications_stage_id ON applications(stage_id)',
+    // Five stages for every existing role, in one statement (ids come out grouped by role and in order).
+    {
+      sql: `INSERT INTO role_stages (role_id, position, name, kind, created_at)
+            SELECT r.id, s.position, s.name, s.kind, ?
+              FROM job_roles r
+             CROSS JOIN (SELECT 0 AS position, 'New' AS name, 'new' AS kind
+                         UNION ALL SELECT 1, 'Reviewing', 'progress'
+                         UNION ALL SELECT 2, 'Trial', 'progress'
+                         UNION ALL SELECT 3, 'Onboarded', 'onboarded'
+                         UNION ALL SELECT 4, 'Passed', 'passed') s
+             ORDER BY r.id, s.position`,
+      args: [now],
+    },
+    // Point every application at the stage of its own role that matches its legacy value.
+    `UPDATE applications SET stage_id = (
+       SELECT s.id FROM role_stages s
+        WHERE s.role_id = applications.role_id
+          AND s.name = CASE applications.stage
+                         WHEN 'new' THEN 'New' WHEN 'reviewing' THEN 'Reviewing' WHEN 'trial' THEN 'Trial'
+                         WHEN 'onboarded' THEN 'Onboarded' WHEN 'passed' THEN 'Passed' END)`,
+    // Tripwire: if any application of an existing role was NOT mapped, or any role lacks its five stages, this INSERT
+    // violates NOT NULL, the whole batch (table, column, backfill, tracking row) rolls back and start-up fails
+    // loudly instead of running on a half-migrated database. It can never insert a row.
+    {
+      sql: `INSERT INTO role_stages (role_id, position, name, kind, created_at)
+            SELECT NULL, 0, 'migration check failed', 'new', ?
+             WHERE EXISTS (SELECT 1 FROM applications a JOIN job_roles r ON r.id = a.role_id WHERE a.stage_id IS NULL)
+                OR EXISTS (SELECT 1 FROM job_roles r WHERE (SELECT COUNT(*) FROM role_stages s WHERE s.role_id = r.id) != 5)`,
+      args: [now],
+    },
+    `CREATE TRIGGER applications_stage_id_on_insert AFTER INSERT ON applications WHEN NEW.stage_id IS NULL
+  BEGIN UPDATE applications SET stage_id = ${STAGE_ID_FROM_LEGACY} WHERE id = NEW.id; END`,
+    `CREATE TRIGGER applications_stage_id_on_stage AFTER UPDATE OF stage ON applications
+  WHEN NEW.stage_id IS OLD.stage_id AND NEW.stage IS NOT OLD.stage
+  BEGIN UPDATE applications SET stage_id = ${STAGE_ID_FROM_LEGACY} WHERE id = NEW.id; END`,
+  ];
+}
 
 // One cheap read. A missing schema_migrations table means version 0.
 async function currentVersion(db) {
@@ -194,11 +259,12 @@ async function currentVersion(db) {
   }
 }
 
-async function migrate(db) {
+// upTo (tests only): stop after that version, to build a database at an older schema.
+async function migrate(db, { upTo = Infinity } = {}) {
   let version = await currentVersion(db);
   const from = version;
   for (const m of MIGRATIONS) {
-    if (m.version <= version) continue;
+    if (m.version <= version || m.version > upTo) continue;
     const statements = [
       ...m.statements(),
       { sql: 'INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', args: [m.version, nowIso()] },

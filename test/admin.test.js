@@ -211,16 +211,17 @@ test('AC-32: CSV export columns, one row per application, date filter, formula-i
   assert.ok(res.text.startsWith('\ufeffapplication_id,'));
   const rows = parseCsv(res.text);
   assert.deepEqual(rows[0], CSV_COLUMNS);
-  assert.deepEqual(rows[0], ['application_id', 'applied_at', 'name', 'email', 'role_title', 'vertical', 'site_name', 'assigned_rep', 'source_tag', 'heard_from', 'stage', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url']);
+  assert.deepEqual(rows[0], ['application_id', 'applied_at', 'name', 'email', 'role_title', 'vertical', 'site_name', 'assigned_rep', 'source_tag', 'heard_from', 'stage', 'stage_kind', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url']);
   assert.equal(rows.length - 1, await count(t.db, 'applications'));
-  assert.ok(rows.every((r) => r.length === 15));
+  assert.ok(rows.every((r) => r.length === 16));
   const r1 = rows.find((r) => r[0] === String(a1));
   assert.equal(r1[1], '2026-03-09 23:30'); // America/New_York
   assert.equal(r1[2], `'=HYPERLINK("http://evil")`);
   assert.equal(r1[4], 'CSV, "Quoted" Role');
   assert.equal(r1[8], "'+plus");
   assert.equal(r1[9], 'Referral');
-  assert.equal(r1[10], 'new');
+  assert.equal(r1[10], 'New'); // the stage NAME
+  assert.equal(r1[11], 'new'); // and its kind
   assert.match(res.text, /"'=HYPERLINK\(""http:\/\/evil""\)"/);
   const r2 = rows.find((r) => r[0] === String(a2));
   assert.equal(r2[2], 'Line Break'); // whitespace in single-line fields is collapsed

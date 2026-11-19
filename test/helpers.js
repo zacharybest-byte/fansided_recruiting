@@ -9,6 +9,7 @@ const { createHttpServer } = require('../src/server');
 const { nowIso, openDb, migrate } = require('../src/lib/db');
 const { hashPassword } = require('../src/lib/password');
 const { startFakeTurso } = require('./fake-turso');
+const { insertStagesAfterRole, DEFAULT_PROGRESS } = require('../src/lib/stages');
 
 // scrypt is deliberately slow (about 85 ms at N=32768), so the shared test password is hashed ONCE per process
 // and the hash string is reused for every test user. To keep the suite quick that one string uses a cheap cost
@@ -92,11 +93,11 @@ async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl,
 }
 
 // An empty, migrated database on the given driver, without the app (for database-level tests).
-async function freshDb(driver, { fetchImpl } = {}) {
+async function freshDb(driver, { fetchImpl, upTo } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsr-db-'));
   const fake = driver === 'turso' ? await startFakeTurso() : null;
   const db = openDb({ dataDir: dir, tursoUrl: fake && fake.url, tursoToken: fake && fake.token }, { fetchImpl });
-  await migrate(db);
+  await migrate(db, upTo ? { upTo } : undefined);
   return {
     db,
     fake,
@@ -212,13 +213,30 @@ async function makeUser(db, { email, name = email.split('@')[0], role = 'rep', a
   return r.lastInsertRowid;
 }
 
-async function makeRole(db, { title = 'Test Role', vertical = 'NFL', site = 'Test Site', status = 'open', assigned = null, questions = [], description = 'A role.' } = {}) {
+async function makeRole(db, { title = 'Test Role', vertical = 'NFL', site = 'Test Site', status = 'open', assigned = null, questions = [], description = 'A role.', progress } = {}) {
   const now = nowIso();
-  const r = await db.run(
-    'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [title, vertical, site, description, status, assigned, JSON.stringify(questions), now, now]
-  );
-  return r.lastInsertRowid;
+  // Like the admin screen: the role and its workflow in one batch.
+  const results = await db.batch([
+    {
+      sql: 'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [title, vertical, site, description, status, assigned, JSON.stringify(questions), now, now],
+    },
+    ...insertStagesAfterRole(progress || DEFAULT_PROGRESS, now),
+  ]);
+  return results[0].lastInsertRowid;
+}
+
+// The id (as a string, as a form field) of a role's stage by name, case-insensitive.
+async function stageId(db, roleId, name) {
+  const r = await db.get('SELECT id FROM role_stages WHERE role_id = ? AND lower(name) = lower(?)', [roleId, name]);
+  if (!r) throw new Error(`no stage "${name}" in role ${roleId}`);
+  return String(r.id);
+}
+
+// POSTs the stage form of an application with stage NAMES resolved to ids of the application's own role.
+async function moveStage(client, db, applicationId, to, from, extra = {}) {
+  const a = await db.get('SELECT role_id FROM applications WHERE id = ?', [applicationId]);
+  return client.post(`/app/applications/${applicationId}/stage`, { stage: await stageId(db, a.role_id, to), from_stage: await stageId(db, a.role_id, from), ...extra });
 }
 
 function lastApplication(db) {
@@ -229,4 +247,4 @@ async function count(db, table, where = '1=1', ...args) {
   return (await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, args)).n;
 }
 
-module.exports = { DRIVERS, TEST_PASSWORD, SESSION_SECRET, startApp, freshDb, Client, makeUser, makeRole, lastApplication, count };
+module.exports = { DRIVERS, TEST_PASSWORD, SESSION_SECRET, startApp, freshDb, Client, makeUser, makeRole, lastApplication, count, stageId, moveStage };

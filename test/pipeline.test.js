@@ -1,7 +1,7 @@
 'use strict';
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count, stageId, moveStage } = require('./helpers');
 
 for (const driver of DRIVERS) describe(`[${driver}]`, () => {
 
@@ -16,7 +16,7 @@ function dashboardCounts(htmlText, roleId) {
   const row = new RegExp(`data-role-id="${roleId}">([\\s\\S]*?)</ol>`).exec(htmlText);
   if (!row) return null;
   const out = {};
-  for (const m of row[1].matchAll(/data-stage="(\w+)"><span class="stage-seg-n">(\d+)</g)) out[m[1]] = Number(m[2]);
+  for (const m of row[1].matchAll(/data-stage="\d+" data-kind="\w+"><span class="stage-seg-n">(\d+)<\/span><span class="stage-seg-l">([^<]+)</g)) out[m[2].toLowerCase()] = Number(m[1]);
   return out;
 }
 
@@ -49,7 +49,7 @@ test('AC-18: dashboard shows my roles with per-stage counts; All roles shows eve
   assert.deepEqual(dashboardCounts(mine.text, roleA), { new: 2, reviewing: 0, trial: 1, onboarded: 0, passed: 0 });
   assert.ok(dashboardCounts(mine.text, roleC)); // closed but assigned: still listed internally
   assert.equal(dashboardCounts(mine.text, roleB), null);
-  assert.match(mine.text, /class="stage-seg stage-new is-hot" data-stage="new"><span class="stage-seg-n">2</); // new counts highlighted
+  assert.match(mine.text, /class="stage-seg stage-new is-hot" data-stage="\d+" data-kind="new"><span class="stage-seg-n">2</); // new counts highlighted
   const all = await c.get('/app?view=all');
   assert.deepEqual(dashboardCounts(all.text, roleB), { new: 1, reviewing: 0, trial: 0, onboarded: 0, passed: 0 });
   assert.ok(dashboardCounts(all.text, roleA));
@@ -57,15 +57,21 @@ test('AC-18: dashboard shows my roles with per-stage counts; All roles shows eve
   assert.match(mine.text, /href="\/app\/export"/);
 });
 
-test('AC-19: role pipeline shows the five stages in fixed order', async () => {
+function boardSection(text, name) {
+  const parts = text.split('<section class="board-col ').slice(1);
+  const hit = parts.find((p) => new RegExp(`<h2 id="h-\\d+">${name}</h2>`).test(p));
+  assert.ok(hit, `no board column "${name}"`);
+  return hit.split('</section>')[0];
+}
+
+test('AC-19: role pipeline shows the role\'s stages in order (New, Reviewing, Trial, Onboarded, Passed by default)', async () => {
   const c = t.client();
   await c.login('rep1@fansided.com');
   const res = await c.get(`/app/roles/${roleA}`);
-  const order = [...res.text.matchAll(/<section class="board-col stage-\w+" id="stage-(\w+)"/g)].map((m) => m[1]);
-  assert.deepEqual(order, ['new', 'reviewing', 'trial', 'onboarded', 'passed']);
-  const trialSection = res.text.split('id="stage-trial"')[1].split('</section>')[0];
-  assert.match(trialSection, /d1@example.com/);
-  const newSection = res.text.split('id="stage-new"')[1].split('</section>')[0];
+  const order = [...res.text.matchAll(/<section class="board-col stage-(\w+)" id="stage-\d+" data-stage="\d+" data-kind="\w+" aria-labelledby="h-\d+">\s*<div class="board-col-head">\s*<h2 id="h-\d+">([^<]+)</g)].map((m) => `${m[1]}:${m[2]}`);
+  assert.deepEqual(order, ['new:New', 'progress:Reviewing', 'progress:Trial', 'onboarded:Onboarded', 'passed:Passed']);
+  assert.match(boardSection(res.text, 'Trial'), /d1@example.com/);
+  const newSection = boardSection(res.text, 'New');
   assert.match(newSection, /d2@example.com/);
   assert.match(newSection, /d3@example.com/);
   assert.match(res.text, /Reassign rep/);
@@ -78,7 +84,7 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
   await c.login('rep1@fansided.com');
   await c.get(`/app/roles/${roleA}`);
   const before = Date.now();
-  const res = await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', from_stage: 'new', return_to: `/app/roles/${roleA}` });
+  const res = await moveStage(c, t.db, id, 'reviewing', 'new', { return_to: `/app/roles/${roleA}` });
   assert.equal(res.status, 303);
   assert.equal(res.headers.get('location'), `/app/roles/${roleA}`);
   let app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
@@ -87,24 +93,24 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
   assert.equal(events.length, 2);
   const e = events[1];
   assert.equal(e.type, 'stage_change');
-  assert.equal(e.from_value, 'new');
-  assert.equal(e.to_value, 'reviewing');
+  assert.equal(e.from_value, 'New'); // events keep the stage NAMES
+  assert.equal(e.to_value, 'Reviewing');
   assert.equal(e.actor_user_id, rep1);
   assert.ok(Date.parse(e.at) >= before - 1000);
   assert.equal(app.stage_changed_at, e.at);
 
   // Picking the current stage again does nothing, and says so.
-  const same = await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', from_stage: 'reviewing' });
+  const same = await moveStage(c, t.db, id, 'reviewing', 'reviewing');
   assert.equal(same.status, 303);
   assert.match((await c.follow(same)).text, /Already in Reviewing\./);
   assert.equal(await count(t.db, 'application_events', 'application_id = ?', id), 2);
 
   const snapshot = JSON.stringify(await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]));
-  await c.post(`/app/applications/${id}/stage`, { stage: 'trial', from_stage: 'reviewing' });
-  await c.post(`/app/applications/${id}/stage`, { stage: 'passed', from_stage: 'trial' });
+  await moveStage(c, t.db, id, 'trial', 'reviewing');
+  await moveStage(c, t.db, id, 'passed', 'trial');
   events = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
   assert.equal(events.length, 4);
-  assert.deepEqual(events.map((x) => [x.from_value, x.to_value]), [[null, 'new'], ['new', 'reviewing'], ['reviewing', 'trial'], ['trial', 'passed']]);
+  assert.deepEqual(events.map((x) => [x.from_value, x.to_value]), [[null, 'New'], ['New', 'Reviewing'], ['Reviewing', 'Trial'], ['Trial', 'Passed']]);
   assert.equal(JSON.stringify(events.slice(0, 2)), snapshot); // earlier rows unchanged
   for (let i = 1; i < events.length; i++) assert.ok(events[i].at >= events[i - 1].at);
   await assert.rejects(t.db.run("UPDATE application_events SET to_value = 'x' WHERE id = ?", [events[0].id]), /append-only/);
@@ -132,7 +138,7 @@ test('AC-22: Onboarded with Voltax ID and date saves both, sets onboarded_at and
     const page = await c.get(`/app/applications/${id}`);
     assert.match(page.text, /name="voltax_user_id"/);
     assert.match(page.text, /name="voltax_onboarded_on" value="\d{4}-\d{2}-\d{2}"/); // defaults to today
-    const res = await c.post(`/app/applications/${id}/stage`, { stage: 'onboarded', from_stage: 'new', voltax_user_id: 'vx-777', voltax_onboarded_on: '2026-11-02' });
+    const res = await moveStage(c, t.db, id, 'onboarded', 'new', { voltax_user_id: 'vx-777', voltax_onboarded_on: '2026-11-02' });
     assert.equal(res.status, 303);
     const app = await t.db.get('SELECT * FROM applications WHERE id = ?', [id]);
     assert.equal(app.stage, 'onboarded');
@@ -157,7 +163,7 @@ test('AC-23: moving to another role changes where it appears, logs role_change, 
   const c = t.client();
   await c.login('rep1@fansided.com');
   await c.get(`/app/applications/${id}`);
-  await c.post(`/app/applications/${id}/stage`, { stage: 'reviewing', from_stage: 'new' });
+  await moveStage(c, t.db, id, 'reviewing', 'new');
   await c.post(`/app/applications/${id}/notes`, { body: 'Note before move' });
   await c.post(`/app/applications/${id}/email`, { via: 'gmail', subject: 'Hello', body: 'Body before move' });
   const eventsBefore = await t.db.all('SELECT * FROM application_events WHERE application_id = ? ORDER BY id', [id]);
@@ -179,7 +185,7 @@ test('AC-23: moving to another role changes where it appears, logs role_change, 
   const pipeA = await c.get(`/app/roles/${roleA}`);
   assert.doesNotMatch(pipeA.text, /mover@example.com/);
   const pipeB = await c.get(`/app/roles/${roleB}`);
-  assert.match(pipeB.text.split('id="stage-reviewing"')[1].split('</section>')[0], /mover@example.com/);
+  assert.match(boardSection(pipeB.text, 'Reviewing'), /mover@example.com/);
   const page = await c.get(`/app/applications/${id}`);
   assert.match(page.text, /Note before move/);
   assert.match(page.text, /Body before move/);
@@ -191,7 +197,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   const c = t.client();
   await c.login('rep2@fansided.com');
   await c.get(`/app/applications/${first}`);
-  await c.post(`/app/applications/${first}/stage`, { stage: 'passed', from_stage: 'new' });
+  await moveStage(c, t.db, first, 'passed', 'new');
   await c.post(`/app/applications/${first}/notes`, { body: 'Good writer, wrong team' });
   await c.post(`/app/applications/${first}/email`, { via: 'gmail', subject: 'Earlier email', body: 'Sent on the first application' });
 

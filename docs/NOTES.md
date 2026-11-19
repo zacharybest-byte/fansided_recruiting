@@ -1,5 +1,25 @@
 # Build notes
 
+## 2.2.0 (per-role workflows, copy a role)
+
+Spec: `docs/SPEC.md` (AC-61 to AC-69). Tests: `test/workflow.test.js`, `test/migration.test.js`.
+
+### What changed
+- Every role owns an ordered list of stages (`role_stages`): New first, Onboarded and Passed last (fixed), 0 to 6 in-progress stages in between (default Reviewing, Trial). `applications.stage_id` is the source of truth; the legacy `stage` column is still written as the category (`new`, `reviewing` for any in-progress stage, `onboarded`, `passed`) so old queries and exports keep working. Events store stage names.
+- Role form: a Workflow section (no JS: six always-present rows, position numbers, clear a name to remove) saved together with the role in ONE guarded batch. Roles list: Duplicate (`/app/admin/roles/new?copy=<id>`).
+- Board, move menus, candidate stepper, dashboard counters, search, CSV (`stage` is the name, new `stage_kind`), sample data (two sample roles have their own workflow) all read the role's stages. Dashboard strip: "In progress" replaces "In Trial".
+- Moving a candidate to another role maps the stage (kind, same name, first in-progress, New) and logs it.
+
+### Migration 3 (live data: read this)
+Additive only, one atomic batch with its tracking row: create `role_stages` + index, `ALTER TABLE applications ADD COLUMN stage_id`, index, backfill (five stages per role in one INSERT...SELECT, one UPDATE pointing each application at the stage of ITS role with the legacy value's name), a tripwire that aborts everything if any application or role is left unmapped, and two triggers that keep `stage_id` right for writers that only know the legacy column. No table rebuild, no DROP/RENAME, no PRAGMA. Concurrent cold starts: the loser fails on "already exists" and re-reads the version. A start-up repair (idempotent, one read when clean) covers rows an older deployment writes after the migration (roles without stages, applications without or with a foreign `stage_id`); pages also repair a role they find without stages.
+
+### Decisions
+- Stage ids in forms (`stage`, `from_stage`), not names: renames never break an open tab; a stale or foreign id is "someone else changed this candidate".
+- Guards that must abort a whole batch use `abortIf()` (an INSERT that violates NOT NULL when its condition holds), because `db.batch` has no interactive transaction.
+- The workflow editor is only applied when the form carries `stage_slots=1`; an old role form (a tab opened before the deploy) saves the role and leaves the workflow alone.
+- No unique index on stage names or positions: renames and reorders pass through states a per-statement index would refuse; uniqueness is validated in the app and the stage set is guarded in the batch.
+- Known quirk: events from before 2.2.0 hold lower-case words (`reviewing`). They display as "Reviewing". A custom stage named exactly in lower case like a legacy word ("trial") shows capitalised in the event log.
+
 ## 2.0.0 (Vercel + Turso + password sign-in)
 
 Contract: `docs/SCOPE-V2.md`. Spec and acceptance checks: `docs/SPEC.md` (AC-36 to AC-60 are new).

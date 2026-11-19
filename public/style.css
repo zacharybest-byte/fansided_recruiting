@@ -16,7 +16,7 @@
    Tables ............ .table-wrap > table.data (th, td, .num, .wrap, tr:hover, tr.inactive)
    Badges ............ .badge (.badge-open, .badge-closed, .badge-accent), .stage-badge.stage-X, .stage-dot.stage-X, .status
    Stage counter ..... ol.stage-counter > li.stage-seg.stage-X[.is-hot] > .stage-seg-n + .stage-seg-l
-   Board ............. .board > section.board-col.stage-X > .board-col-head + ul.board-list > li.cand-card
+   Board ............. .board > section.board-col.stage-<kind: new|progress|onboarded|passed> > .board-col-head + ul.board-list > li.cand-card
                        (.cand-name, .cand-meta, .cand-move); .board-empty
    Stage stepper ..... ol.stepper > li.stepper-step[.is-done|.is-current] > .stepper-dot + .stepper-label
    Summary strip ..... .summary-strip > .summary-item[.is-hot] > .summary-n + .summary-l
@@ -53,8 +53,7 @@
   --ok-bg: #edf7f2;
   --focus: var(--brand);
   --stage-new: #5a97c1;
-  --stage-reviewing: #062f4d;
-  --stage-trial: #7a5bd6;
+  --stage-progress: #062f4d; /* every in-progress stage shares this hue: the stage NAME is what tells them apart */
   --stage-onboarded: #12805c;
   --stage-passed: #999999;
   /* legacy names the older markup still uses */
@@ -369,7 +368,7 @@ table.pipeline col.c-source { width: 14%; } table.pipeline col.c-days { width: 9
 table.pipeline form.inline { flex-wrap: nowrap; }
 
 /* ---------- Badges and stage markers ---------- */
-.stage-new { --stage: var(--stage-new); } .stage-reviewing { --stage: var(--stage-reviewing); } .stage-trial { --stage: var(--stage-trial); }
+.stage-new { --stage: var(--stage-new); } .stage-progress { --stage: var(--stage-progress); }
 .stage-onboarded { --stage: var(--stage-onboarded); } .stage-passed { --stage: var(--stage-passed); }
 .badge, .status { display: inline-flex; align-items: center; gap: var(--sp-2); padding: 0.05rem 0.55rem; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--paper); font-size: var(--fs-xs); font-weight: 700; line-height: 1.5; white-space: nowrap; }
 .badge-open, .status-open { border-color: var(--ok); color: #0d5f44; background: var(--ok-bg); }
@@ -380,10 +379,10 @@ table.pipeline form.inline { flex-wrap: nowrap; }
 .stage-dot { vertical-align: baseline; }
 
 /* five-segment stage counter */
-.stage-counter { list-style: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-1); margin: 0; padding: 0; font-variant-numeric: tabular-nums; }
+.stage-counter { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(4.25rem, 1fr)); gap: var(--sp-1); margin: 0; padding: 0; font-variant-numeric: tabular-nums; }
 .stage-seg { border-top: 4px solid var(--stage, var(--line)); padding-top: var(--sp-1); min-width: 0; }
 .stage-seg-n { color: var(--brand); display: inline-block; font-family: var(--font-head); font-weight: 800; font-size: var(--fs-lg); line-height: 1.2; padding: 0 0.3em; margin-left: -0.3em; border-radius: var(--radius); }
-.stage-seg-l { display: block; font-size: var(--fs-xs); color: var(--mute); overflow: hidden; text-overflow: ellipsis; }
+.stage-seg-l { display: block; font-size: var(--fs-xs); color: var(--mute); overflow-wrap: anywhere; line-height: 1.3; }
 .stage-seg.is-zero .stage-seg-n { color: var(--mute); font-weight: 400; }
 .stage-seg.is-hot .stage-seg-n { background: var(--accent); color: var(--on-accent); }
 .stage-seg.is-hot .stage-seg-l { color: var(--ink); font-weight: 700; }
@@ -410,7 +409,8 @@ table.pipeline form.inline { flex-wrap: nowrap; }
 @media (max-width: 600px) { .summary-strip { grid-template-columns: 1fr 1fr; } .summary-item:nth-child(odd) { border-left: 0; } .summary-item:nth-child(n+3) { border-top: 1px solid var(--line); } }
 
 /* ---------- Board ---------- */
-.board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-3); align-items: start; margin: 0 0 var(--sp-6); }
+/* One column per stage of the role (3 to 9). Columns never get narrower than 12.5rem: past that the board scrolls inside its own box. */
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(12.5rem, 1fr); gap: var(--sp-3); align-items: start; margin: 0 0 var(--sp-6); overflow-x: auto; padding-bottom: var(--sp-2); }
 .board-col { background: #e8edf1; border-top: 4px solid var(--stage, var(--line)); border-radius: var(--radius); padding: var(--sp-3); min-width: 0; }
 .board-col-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); margin-bottom: var(--sp-3); }
 .board-col-head h2, .board-col-head h3 { font-size: var(--fs-lg); margin: 0; }
@@ -427,7 +427,11 @@ table.pipeline form.inline { flex-wrap: nowrap; }
 .cand-move select { flex: 1; min-width: 0; min-height: 2rem; padding: 0.15rem 0.4rem; font-size: var(--fs-xs); }
 .cand-move button { min-height: 2rem; padding: 0.15rem 0.6rem; font-size: var(--fs-xs); }
 @media (max-width: 1100px) and (min-width: 901px) { .board { gap: var(--sp-2); } .board-col { padding: var(--sp-2); } }
-@media (max-width: 900px) { .board { grid-template-columns: 1fr; } .board-list { grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); } }
+@media (max-width: 900px) { .board { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: 1fr; overflow-x: visible; } .board-list { grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); } }
+
+/* shown only while the board scrolls sideways */
+.board-hint { margin: 0 0 var(--sp-2); color: var(--mute); font-size: var(--fs-sm); }
+@media (max-width: 900px) { .board-hint { display: none; } }
 
 /* ---------- Role rows (public openings and dashboard) ---------- */
 .role-list { list-style: none; margin: 0; padding: 0; border-top: 2px solid var(--brand); }
@@ -561,7 +565,7 @@ td form.inline.nowrap select { min-width: 5.5rem; }
 .stack-form > .field, .stack-form > .form-section { max-width: 44rem; }
 .stack-form .field textarea { max-width: none; }
 .centred-card { max-width: 40rem; }
-@media (max-width: 520px) { .stepper-step { min-width: 0; font-size: 0.75rem; } }
+@media (max-width: 520px) { .stepper-step { min-width: 4.5rem; font-size: 0.75rem; overflow-wrap: anywhere; } }
 .question-row .field { flex: 1 1 18rem; margin: 0; }
 .question-row .check { min-height: 2.5rem; }
 .question-row { margin-bottom: var(--sp-3); }
@@ -641,11 +645,23 @@ td form.inline.nowrap select { min-width: 5.5rem; }
 .error-summary { scroll-margin-top: var(--sp-4); }
 main:focus { outline: none; }
 
-/* stage counter: two rows (3 + 2) when five columns would clip the labels */
-@media (max-width: 400px) {
-  .stage-counter { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: var(--sp-2); }
-  .stage-seg-l { overflow: visible; text-overflow: clip; white-space: nowrap; }
-}
+/* stage counter: rows wrap by themselves (auto-fit); a little room between rows */
+.stage-counter { row-gap: var(--sp-2); }
+@media (max-width: 400px) { .stage-counter { grid-template-columns: repeat(auto-fit, minmax(3.75rem, 1fr)); } }
+
+/* workflow editor on the role form */
+.stage-edit { list-style: none; margin: 0 0 var(--sp-3); padding: 0; max-width: 44rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); }
+.stage-edit-row { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-4); align-items: flex-end; padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--line); }
+.stage-edit-row:first-child { border-top: 0; }
+.stage-edit-row.is-fixed { align-items: center; justify-content: space-between; background: var(--field); }
+.stage-edit-fixed { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.stage-edit-note { color: var(--mute); font-size: var(--fs-sm); }
+.stage-edit-row .field { margin: 0; }
+.stage-edit-name { flex: 1 1 14rem; min-width: 0; }
+.stage-edit-pos { flex: 0 0 6rem; }
+.stage-edit-pos input { width: 100%; }
+.stage-edit-row > .error { flex: 1 1 100%; margin: 0; }
+.stage-edit-row.has-error { background: var(--danger-bg); }
 
 /* tap targets on small screens: 44px controls, 40px for text links (padding, so lists stay compact) */
 @media (max-width: 600px) {

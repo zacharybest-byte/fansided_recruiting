@@ -140,7 +140,7 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       const roleB = await makeRole(t.db, { title: 'Role B', assigned: rep });
       const quiet = await makeRole(t.db, { title: 'Quiet', assigned: rep });
       const row = (text, id) => new RegExp(`data-role-id="${id}">[\\s\\S]*?<div class="role-row-action">`).exec(text)[0];
-      const newCell = (text, id) => /<li class="stage-seg stage-new[^"]*" data-stage="new">[\s\S]*$/.exec(row(text, id))[0];
+      const newCell = (text, id) => /<li class="stage-seg stage-new[^"]*" data-stage="\d+" data-kind="new">[\s\S]*$/.exec(row(text, id))[0];
       const stamp = async () => (await t.db.get("SELECT dashboard_seen_at FROM users WHERE email = 'rep@fansided.com'")).dashboard_seen_at;
       await t.client().apply(roleA, { email: 'before1@example.com' }); // arrived before the account existed
       await new Promise((r) => setTimeout(r, 15));

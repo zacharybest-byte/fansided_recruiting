@@ -2,7 +2,7 @@
 // Regression tests for the issues found in QA of v1.
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { DRIVERS, startApp, freshDb, makeUser, makeRole, lastApplication, count } = require('./helpers');
+const { DRIVERS, startApp, freshDb, makeUser, makeRole, lastApplication, count, moveStage } = require('./helpers');
 
 for (const driver of DRIVERS) {
 
@@ -163,7 +163,7 @@ describe(`[${driver}] QA fixes`, () => {
     await t.client().apply(role, { email: 'pipe-onboard@example.com', answer_0: 'a' });
     const app = await lastApplication(t.db);
     await admin.get(`/app/roles/${role}`);
-    const res = await admin.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'new', return_to: `/app/roles/${role}` });
+    const res = await moveStage(admin, t.db, app.id, 'onboarded', 'new', { return_to: `/app/roles/${role}` });
     assert.equal(res.headers.get('location'), `/app/applications/${app.id}#voltax`);
     const page = await admin.follow(res);
     assert.match(page.text, /<h3 id="voltax">Voltax<\/h3>/);
@@ -171,7 +171,7 @@ describe(`[${driver}] QA fixes`, () => {
     await t.client().apply(role, { email: 'pipe-review@example.com', answer_0: 'a' });
     const app2 = await lastApplication(t.db);
     await admin.get(`/app/roles/${role}`);
-    const res2 = await admin.post(`/app/applications/${app2.id}/stage`, { stage: 'reviewing', from_stage: 'new', return_to: `/app/roles/${role}` });
+    const res2 = await moveStage(admin, t.db, app2.id, 'reviewing', 'new', { return_to: `/app/roles/${role}` });
     assert.equal(res2.headers.get('location'), `/app/roles/${role}`);
   });
 });

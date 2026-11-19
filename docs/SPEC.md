@@ -74,10 +74,14 @@ Reps see every role (PTO cover). The dashboard defaults to "my roles".
 7. **Account** `/app/account`: change own password (current + new twice).
 
 ### Internal (login required)
-8. **Dashboard** `/app`: roles assigned to me with per-stage counts; the **New** count is highlighted per
+8. **Dashboard** `/app`: summary strip (Open roles, **New applications** = kind new, **In progress** = every
+   in-progress stage, Onboarded this month); roles assigned to me, each with a counter of THAT role's own stages
+   (New, its in-progress stages, Onboarded, Passed; wraps cleanly up to nine); the **New** count is highlighted per
    role, with "+N since your last visit" where N > 0. Toggle "All roles". Link to Export.
-9. **Role pipeline** `/app/roles/:id`: header with Reassign rep; candidates in five sections New, Reviewing,
-   Trial, Onboarded, Passed; inline stage move.
+9. **Role pipeline** `/app/roles/:id`: header with Reassign rep; one column per stage of the role, in order
+   (3 to 9; the board scrolls inside its own box when columns would be narrower than 12.5rem, and stacks into
+   sections under 900 px); inline "Move to…" lists the role's other stages. Colours by kind: New = Yeti Blue,
+   in-progress = FanSided Blue (one hue; the name tells them apart), Onboarded = green, Passed = gray.
 10. **Candidate** `/app/applications/:id`: header; Change stage (+ Voltax ID/date on Onboarded); Record Voltax;
     Move to another role; application details (resume link, sample links, answers, source); Notes;
     **Compose email**; Activity (events + logged emails); History; admin-only Delete candidate.
@@ -88,7 +92,19 @@ Reps see every role (PTO cover). The dashboard defaults to "my roles".
       (`https://mail.google.com/mail/?view=cm&fs=1&to=..&su=..&body=..` or `mailto:`), which the external
       JS follows automatically and a no-JS user clicks. The recipient is always the person's stored email,
       never a form field. The logged email appears in Activity as "opened in Gmail" / "opened in mail app".
-11. **Templates admin** `/app/admin/templates`, **Roles admin** `/app/admin/roles`: as v1.
+11. **Templates admin** `/app/admin/templates`, **Roles admin** `/app/admin/roles`: as v1, plus per role:
+    - **Workflow** section on the role form. New, Onboarded and Passed are shown read-only. Six rows (the role's
+      own in-progress stages first, then blank spare rows) each have a name (1 to 30 characters, unique in the
+      role ignoring case, not one of the three fixed names) and a **Position** number. A filled blank row adds a
+      stage; clearing the name of a stage removes it, which is refused with "Move the N candidates out of X
+      before removing it." while it has candidates; renaming keeps candidates where they are. The whole form
+      (role fields + workflow) is ONE batch with SQL guards that abort it all if the stage list changed or a
+      removed stage gained a candidate meanwhile (409, nothing saved). A form without the editor (an old tab)
+      leaves the workflow alone. Errors use the error-summary pattern.
+    - **Duplicate** link per role: `GET /app/admin/roles/new?copy=<id>` shows the new-role form pre-filled
+      ("Copy of <title>", vertical, site, description, questions with their required flags and order, the
+      workflow, the assigned rep when still active; status Closed). Nothing is created until Save; candidates
+      are never copied; an unknown or malformed id gives the plain empty form. Admin only.
 12. **Users admin** `/app/admin/users`: add user (email, name, role) creates the user without a password and
     shows a **single-use invite link** to copy; per user: edit name, change role, deactivate/reactivate,
     **Create reset link** (shown once to copy). Status column: Active / Invite pending / Deactivated.
@@ -108,7 +124,24 @@ Integer `id INTEGER PRIMARY KEY AUTOINCREMENT` (ids are never reused); timestamp
 - **rate_limits**: `key` (text; HMAC of bucket + IP or email, never the raw value), `at`; index on `(key, at)`
 - **job_roles**: v1 columns + `is_sample`
 - **people**: v1 columns + `is_sample`
-- **applications**: v1 columns minus `file_path`/`file_name`, plus `resume_url`
+- **applications**: v1 columns minus `file_path`/`file_name`, plus `resume_url`, plus (migration 3)
+  `stage_id` (nullable INTEGER, no declared FK): the **source of truth** for where the candidate is. The legacy
+  `stage` column (CHECK-limited to the five old values) is still written as the stage's CATEGORY
+  (new -> `new`, any in-progress stage -> `reviewing`, onboarded, passed; a legacy `trial` row is read as
+  in-progress) so old queries keep working.
+- **role_stages** (migration 3): `id`, `role_id`, `position`, `name`, `kind` (new|progress|onboarded|passed),
+  `created_at`; index `(role_id, position)`. Every role has `New` (position 0, kind new), 0 to 6 in-progress stages,
+  then `Onboarded` and `Passed`. Default for new roles and for every existing role: Reviewing, Trial.
+  `application_events` keep text values: they store stage NAMES (rows written before 2.2.0 hold the lower-case
+  legacy words, which are displayed as their capitalised label).
+- **Migration 3 is additive and atomic**: CREATE TABLE role_stages, its index, `ALTER TABLE applications ADD COLUMN
+  stage_id`, an index, one INSERT...SELECT backfilling five stages per role, one UPDATE pointing every application at
+  the stage of its own role that matches its legacy value, a tripwire INSERT that aborts the whole batch if any
+  application or role would be left unmapped, and two triggers (`applications_stage_id_on_insert`,
+  `applications_stage_id_on_stage`) that keep `stage_id` consistent for a writer that only knows the legacy column
+  (an older deployment still running during a rollout). Nothing is rebuilt, dropped or renamed. A start-up repair
+  (`stages.repair`, idempotent, one read when there is nothing to do) re-points applications and gives stages to roles
+  written by an older deployment after the migration.
 - **application_events**: as v1 (append-only trigger refusing UPDATE)
 - **notes**: as v1.1 (with `role_id`)
 - **email_templates**: as v1 (4 seeded templates)
@@ -233,7 +266,7 @@ Kept from v1 (numbers unchanged; wording updated where v2 changes the mechanism)
 - **AC-16** An internal POST without a valid CSRF token returns 403 and changes nothing.
 - **AC-17** The session cookie is HttpOnly, Secure, SameSite=Lax. After logout or deactivation the old cookie no longer works.
 - **AC-18** Dashboard shows a rep's assigned roles with correct per-stage counts; "All roles" shows every role.
-- **AC-19** Pipeline shows the five fixed stages in order.
+- **AC-19** Pipeline shows the role's stages in order (New, Reviewing, Trial, Onboarded, Passed by default).
 - **AC-20** New -> Reviewing updates the stage and adds one event with from, to, actor, timestamp.
 - **AC-21** After three stage changes there are exactly four events in order, none modified; UPDATE on the event table is refused.
 - **AC-22** Onboarded with Voltax ID and date saves both, sets `onboarded_at`, calls `voltax.createUser` (`not_configured`).
@@ -288,8 +321,19 @@ Security and data
 - **AC-59** Log output for apply, login failure, invite creation, webhook failure and delete candidate contains ids only (no applicant/user email or name, no token, no password).
 - **AC-60** Load sample data creates the flagged roles, people (all `@sample.invalid`) and applications in every stage; loading twice is refused; Remove sample data deletes them and leaves real roles, people and applications untouched; a rep gets 403 on both; two simultaneous loads give no 500 and exactly one set of data; a real applicant using `sample.one@example.com` is a normal applicant.
 
+Workflows and copying roles (2.2.0). Tested on both drivers in `test/workflow.test.js` and `test/migration.test.js`.
+- **AC-61** Migration 3 on a database at the previous schema with applications in all five legacy stages across several roles: every application points at the stage of its own role with the legacy value's name; all other tables and columns are unchanged and nothing is lost; running start-up twice is a no-op; a failure anywhere (including the tripwire) leaves the database exactly as it was; three concurrent migrators end with one workflow per role; the first request of the real app on an old database migrates it and the pages work.
+- **AC-62** Role form: new roles default to Reviewing and Trial; stages are stored in position order, trimmed; 0 to 6 custom stages; validation (duplicate names ignoring case, the three fixed names, over 30 characters, bad position) uses the error summary, keeps what was typed and creates nothing.
+- **AC-63** Editing: rename keeps candidates in place; add, reorder, remove in one save; removing a stage with candidates is refused naming the stage and count and saves nothing; a candidate arriving in a stage being removed, or another admin changing the stage list, between page load and save aborts the whole batch (409, nothing saved); a form without the editor leaves the workflow alone; a stage id of another role is refused.
+- **AC-64** Board columns, "Move to…", candidate stepper, dashboard counters, search and CSV (`stage` = name, `stage_kind`) follow the role's workflow; the dashboard strip shows New applications / In progress / Onboarded this month; Voltax fields follow kind `onboarded`.
+- **AC-65** Stage moves carry stage ids (`from_stage` and `stage`); a stale id, an id of another role, a name or a stage removed meanwhile writes nothing and flashes the conflict message; events store names; the legacy `stage` column holds the category.
+- **AC-66** Moving a candidate to another role maps the stage (kind, then same name ignoring case, then the target's first in-progress stage, then New) and records `role_change` plus a `stage_change` when the name changes; a target workflow that changes meanwhile writes nothing.
+- **AC-67** Stage names are escaped on the board, stepper, badges, dashboard, search, forms, flashes and event log; a formula-like stage name is neutralised in the CSV; reps get 403 on every workflow/role admin route; the new forms require the CSRF token.
+- **AC-68** Duplicate: the roles list links `?copy=<id>`; the form is pre-filled (title "Copy of ", status Closed, questions with required flags, workflow, active rep); GET creates nothing; saving creates an independent role without candidates; malformed ids give the plain form; admin only.
+- **AC-69** Sample data: two of the six sample roles have their own workflows; removing the sample data also removes their stages (roles kept because of real applicants keep theirs).
+
 ## 11. Not in v2 (later)
 
 Resume file upload, Google sign-in, sending mail from the app, self-service "forgot password" email, Gemini
 scouting, in-tool reports, automatic Voltax creation, AI candidate search, revenue tie-in, job-board
-integrations, custom stages, migrating a v1 SQLite file.
+integrations, migrating a v1 SQLite file. (Per-role custom stages shipped in 2.2.0.)

@@ -1,14 +1,15 @@
 'use strict';
 // Internal: candidate page and its actions (stage, role move, Voltax, notes, email log, delete).
 const { html, raw, link, multiline } = require('../lib/render');
-const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, fmtDateTime, sourceLabel } = require('../lib/layout');
+const { page, setFlash, stageBadge, fmtDate, fmtDateTime, sourceLabel } = require('../lib/layout');
+const { roleStages, stageOf, mapStage, legacyCategory, kindOfLegacy, eventStageName, LEGACY_LABELS } = require('../lib/stages');
 const { requireUser, requireAdmin } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
 const { nowIso } = require('../lib/db');
 const { applyMergeFields, firstName, composeUrl, MERGE_FIELDS, VIA_LABELS } = require('../lib/email');
 const { todayIn, isValidYmd } = require('../lib/time');
-const { idParam, stageSelect } = require('./dashboard');
+const { idParam } = require('./dashboard');
 const voltax = require('../voltax');
 
 const LIMITS = { note: 10000, subject: 200, body: 4000 };
@@ -34,8 +35,8 @@ function returnTo(ctx, fallback) {
 function describeEvent(e) {
   if (e.type === 'stage_change') {
     return e.from_value
-      ? `Stage: ${STAGE_LABELS[e.from_value] || e.from_value} → ${STAGE_LABELS[e.to_value] || e.to_value}`
-      : `Applied (stage ${STAGE_LABELS[e.to_value] || e.to_value})`;
+      ? `Stage: ${eventStageName(e.from_value)} → ${eventStageName(e.to_value)}`
+      : `Applied (stage ${eventStageName(e.to_value)})`;
   }
   if (e.type === 'role_change') return `Role: ${e.from_value} → ${e.to_value}`;
   if (e.type === 'voltax_recorded') return `Voltax recorded: ${e.to_value}`;
@@ -71,7 +72,8 @@ async function candidatePage(ctx) {
     [person.id]
   );
   const history = await db.all(
-    `SELECT a.id, a.stage, a.applied_at, r.title AS role_title FROM applications a JOIN job_roles r ON r.id = a.role_id
+    `SELECT a.id, a.stage, a.applied_at, r.title AS role_title, s.name AS stage_name, s.kind AS stage_kind
+       FROM applications a JOIN job_roles r ON r.id = a.role_id LEFT JOIN role_stages s ON s.id = a.stage_id
       WHERE a.person_id = ? AND a.id != ? ORDER BY a.applied_at DESC`,
     [person.id, app.id]
   );
@@ -95,7 +97,9 @@ async function candidatePage(ctx) {
   const linkDiff = Boolean(app.applicant_linkedin) && app.applicant_linkedin !== person.linkedin_url;
   const today = todayIn(config.timezone);
 
-  const stageIndex = STAGES.indexOf(app.stage);
+  const stages = await roleStages(db, app.role_id);
+  const current = stageOf(app, stages);
+  const stageIndex = stages.findIndex((s) => s.id === current.id);
   const sampleLinks = String(app.sample_links || '').split('\n').filter(Boolean);
 
   page(ctx, {
@@ -112,11 +116,11 @@ async function candidatePage(ctx) {
               <div><dt>Applied</dt><dd>${fmtDate(ctx, app.applied_at)}</dd></div>
             </dl>
           </div>
-          <div class="page-actions"><span class="stage-badge stage-${app.stage}">${STAGE_LABELS[app.stage]}</span></div>
+          <div class="page-actions">${stageBadge(current)}</div>
         </div>
         <div class="stepper-card">
           <ol class="stepper" aria-label="Stage">
-            ${STAGES.map((st, i) => html`<li class="stepper-step stage-${st}${i < stageIndex ? ' is-done' : ''}${i === stageIndex ? ' is-current' : ''}"${i === stageIndex ? html` aria-current="step"` : ''}><span class="stepper-dot" aria-hidden="true"></span><span class="stepper-label">${STAGE_LABELS[st]}</span></li>`)}
+            ${stages.map((st, i) => html`<li class="stepper-step stage-${st.kind}${i < stageIndex ? ' is-done' : ''}${i === stageIndex ? ' is-current' : ''}"${i === stageIndex ? html` aria-current="step"` : ''}><span class="stepper-dot" aria-hidden="true"></span><span class="stepper-label">${st.name}</span></li>`)}
           </ol>
         </div>
       </header>
@@ -147,7 +151,7 @@ async function candidatePage(ctx) {
             ? html`<p class="muted">${person.name} has not applied for any other role.</p>`
             : html`<div class="table-wrap"><table class="data"><thead><tr><th>Role</th><th>Applied</th><th>Stage</th></tr></thead><tbody>
               ${history.map(
-                (h) => html`<tr><td><a href="/app/applications/${h.id}">${h.role_title}</a></td><td>${fmtDate(ctx, h.applied_at)}</td><td><span class="stage-badge stage-${h.stage}">${STAGE_LABELS[h.stage]}</span></td></tr>`
+                (h) => html`<tr><td><a href="/app/applications/${h.id}">${h.role_title}</a></td><td>${fmtDate(ctx, h.applied_at)}</td><td>${stageBadge({ kind: h.stage_kind || kindOfLegacy(h.stage), name: h.stage_name || LEGACY_LABELS[h.stage] || h.stage })}</td></tr>`
               )}</tbody></table></div>`}
         </section>
       </div>
@@ -157,12 +161,12 @@ async function candidatePage(ctx) {
           <h2>Move to another stage</h2>
           <form method="post" action="/app/applications/${app.id}/stage" id="stage-form">
             ${csrfField(ctx)}
-            <input type="hidden" name="from_stage" value="${app.stage}">
+            <input type="hidden" name="from_stage" value="${current.id}">
             <div class="field">
               <label for="f-stage">Stage</label>
-              <select name="stage" id="f-stage" required><option value="">Move to…</option>${STAGES.filter((st) => st !== app.stage).map((st) => html`<option value="${st}">${STAGE_LABELS[st]}</option>`)}</select>
+              <select name="stage" id="f-stage" required><option value="">Move to…</option>${stages.filter((st) => st.id !== current.id).map((st) => html`<option value="${st.id}" data-kind="${st.kind}">${st.name}</option>`)}</select>
             </div>
-            ${app.stage === 'onboarded'
+            ${current.kind === 'onboarded'
               ? ''
               : html`<div class="voltax-fields" data-show-for="onboarded">
                   <p class="help muted" id="help-voltax">Only used when moving to Onboarded. The Voltax API is not connected yet, so enter the account by hand.</p>
@@ -171,7 +175,7 @@ async function candidatePage(ctx) {
                 </div>`}
             <div class="form-actions"><button type="submit" class="btn btn-primary">Move</button></div>
           </form>
-          ${app.stage === 'onboarded'
+          ${current.kind === 'onboarded'
             ? html`<h3 id="voltax">Voltax</h3>
               <dl class="meta-list">
                 <div><dt>User ID</dt><dd>${app.voltax_user_id || html`<span class="muted">Not recorded</span>`}</dd></div>
@@ -201,6 +205,7 @@ async function candidatePage(ctx) {
                 )}
               </select>
             </div>
+            <p class="help">The candidate keeps their place in the workflow where the new role has a matching stage (same name), otherwise they start at its first in-progress stage, or at New.</p>
             <div class="form-actions"><button type="submit" class="btn btn-secondary">Move to this role</button></div>
           </form>
         </section>
@@ -287,20 +292,25 @@ async function changeStage(ctx) {
   const id = idParam(ctx.params.id);
   const { app, person } = await loadApplication(db, id);
   const back = returnTo(ctx, `/app/applications/${id}`);
-  const stage = ctx.form.get('stage');
-  if (!STAGES.includes(stage)) {
-    setFlash(ctx, 'error', stage === '' ? 'Choose a stage to move this candidate to.' : 'Unknown stage.');
+  const stages = await roleStages(db, app.role_id);
+  const current = stageOf(app, stages);
+  // Both values are stage ids (not names): a rename between page load and submit must not break the move.
+  const idOf = (v) => (/^[1-9]\d{0,15}$/.test(v) ? Number(v) : null);
+  const targetId = idOf(ctx.form.get('stage'));
+  const target = targetId === null ? null : stages.find((s) => s.id === targetId);
+  if (!target) {
+    setFlash(ctx, 'error', ctx.form.get('stage') === '' ? 'Choose a stage to move this candidate to.' : 'Unknown stage.');
     return ctx.redirect(back);
   }
   // The form carries the stage the page showed. If the candidate has moved on since (another tab, another rep), or
-  // the field is missing or not a stage, nothing is written: this is "stale", never a silent overwrite.
-  const fromStage = ctx.form.get('from_stage');
-  if (!STAGES.includes(fromStage) || fromStage !== app.stage) {
+  // the field is missing or not a stage of this role, nothing is written: this is "stale", never a silent overwrite.
+  const fromId = idOf(ctx.form.get('from_stage'));
+  if (fromId === null || fromId !== current.id) {
     setFlash(ctx, 'error', STALE);
     return ctx.redirect(back);
   }
-  if (stage === fromStage) {
-    setFlash(ctx, 'ok', `Already in ${STAGE_LABELS[stage]}.`);
+  if (target.id === current.id) {
+    setFlash(ctx, 'ok', `Already in ${target.name}.`);
     return ctx.redirect(back);
   }
 
@@ -312,29 +322,31 @@ async function changeStage(ctx) {
   }
   if (voltaxId && !voltaxOn) voltaxOn = todayIn(config.timezone);
 
-  // One atomic batch. The events are inserted first and only if the application is still in the stage we
-  // compared against; the UPDATE carries the same guard, so a concurrent change produces no event rows.
+  // One atomic batch. The events are inserted first and only if the application is still in the stage we compared
+  // against (and the target still belongs to its role); the UPDATE carries the same guards, so a concurrent change
+  // produces no event rows. Event values are the stage NAMES, read in SQL so they match the stage rows exactly.
   const now = nowIso();
-  const guard = 'EXISTS (SELECT 1 FROM applications WHERE id = ? AND stage = ?)';
-  // fromStage (the value the form was rendered with) is the compare-and-swap value in every statement below.
+  const guard = `EXISTS (SELECT 1 FROM applications a JOIN role_stages t ON t.id = ? AND t.role_id = a.role_id WHERE a.id = ? AND a.stage_id = ?)`;
+  const guardArgs = [target.id, id, current.id];
   const statements = [
     {
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
-            SELECT ?, 'stage_change', ?, ?, ?, ? WHERE ${guard}`,
-      args: [id, fromStage, stage, ctx.user.id, now, id, fromStage],
+            SELECT ?, 'stage_change', (SELECT name FROM role_stages WHERE id = ?), (SELECT name FROM role_stages WHERE id = ?), ?, ? WHERE ${guard}`,
+      args: [id, current.id, target.id, ctx.user.id, now, ...guardArgs],
     },
   ];
-  const recordVoltaxHere = stage === 'onboarded' && voltaxId;
+  const recordVoltaxHere = target.kind === 'onboarded' && voltaxId;
   if (recordVoltaxHere) {
     statements.push({
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
             SELECT ?, 'voltax_recorded', (SELECT voltax_user_id FROM applications WHERE id = ?), ?, ?, ? WHERE ${guard}`,
-      args: [id, id, `${voltaxId} (onboarded ${voltaxOn})`, ctx.user.id, now, id, fromStage],
+      args: [id, id, `${voltaxId} (onboarded ${voltaxOn})`, ctx.user.id, now, ...guardArgs],
     });
   }
-  const sets = ['stage = ?', 'stage_changed_at = ?'];
-  const setArgs = [stage, now];
-  if (stage === 'onboarded') {
+  // stage (legacy column) is written as the stage's category; stage_id is the truth.
+  const sets = ['stage_id = ?', 'stage = ?', 'stage_changed_at = ?'];
+  const setArgs = [target.id, legacyCategory(target.kind), now];
+  if (target.kind === 'onboarded') {
     sets.push('onboarded_at = ?');
     setArgs.push(now);
     if (voltaxId) {
@@ -342,17 +354,20 @@ async function changeStage(ctx) {
       setArgs.push(voltaxId, voltaxOn);
     }
   }
-  statements.push({ sql: `UPDATE applications SET ${sets.join(', ')} WHERE id = ? AND stage = ?`, args: [...setArgs, id, fromStage] });
+  statements.push({
+    sql: `UPDATE applications SET ${sets.join(', ')} WHERE id = ? AND stage_id = ? AND EXISTS (SELECT 1 FROM role_stages t WHERE t.id = ? AND t.role_id = applications.role_id)`,
+    args: [...setArgs, id, current.id, target.id],
+  });
   const results = await db.batch(statements);
   if (results[results.length - 1].changes === 0) {
     setFlash(ctx, 'error', STALE);
     return ctx.redirect(back);
   }
 
-  let message = `Moved "${person.name}" to ${STAGE_LABELS[stage]}.`;
-  if (stage === 'onboarded') {
+  let message = `Moved "${person.name}" to ${target.name}.`;
+  if (target.kind === 'onboarded') {
     try {
-      const result = await voltax.createUser(person, { ...app, stage, voltax_user_id: voltaxId || app.voltax_user_id });
+      const result = await voltax.createUser(person, { ...app, stage: 'onboarded', voltax_user_id: voltaxId || app.voltax_user_id });
       if (result && result.status === 'not_configured') {
         message += voltaxId ? ' Voltax details saved.' : ' Voltax is not connected: record the Voltax user ID by hand.';
       }
@@ -363,7 +378,7 @@ async function changeStage(ctx) {
   }
   setFlash(ctx, 'ok', message);
   // Onboarded from the pipeline row (no Voltax fields there): go to the candidate's Voltax form.
-  if (stage === 'onboarded' && !voltaxId && back !== `/app/applications/${id}`) {
+  if (target.kind === 'onboarded' && !voltaxId && back !== `/app/applications/${id}`) {
     return ctx.redirect(`/app/applications/${id}#voltax`);
   }
   ctx.redirect(back);
@@ -410,18 +425,38 @@ async function moveRole(ctx) {
     setFlash(ctx, 'ok', `Already in ${target.title}.`);
     return ctx.redirect(`/app/applications/${id}`);
   }
+  // The candidate keeps its place in the workflow where it can: new / onboarded / passed map by kind; an in-progress
+  // stage maps to the target's stage with the same name, else its first in-progress stage, else New.
+  const from = stageOf(app, await roleStages(db, app.role_id));
+  const to = mapStage(from, await roleStages(db, target.id));
+  const stageChanges = from.name !== to.name;
   const now = nowIso();
-  // Event first, guarded by the role we compared against; the UPDATE carries the same guard.
-  const results = await db.batch([
+  // Events first, guarded by the role and stage we compared against (and the target stage must still be the target
+  // role's); the UPDATE carries the same guard. The stage event only exists when the stage name changes.
+  const guard = `EXISTS (SELECT 1 FROM applications WHERE id = ? AND role_id = ? AND stage_id IS ?) AND EXISTS (SELECT 1 FROM role_stages WHERE id = ? AND role_id = ?)`;
+  const guardArgs = [id, app.role_id, app.stage_id, to.id, target.id];
+  const statements = [
     {
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
-            SELECT ?, 'role_change', ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM applications WHERE id = ? AND role_id = ?)`,
-      args: [id, `${app.role_title} (#${app.role_id})`, `${target.title} (#${target.id})`, ctx.user.id, now, id, app.role_id],
+            SELECT ?, 'role_change', ?, ?, ?, ? WHERE ${guard}`,
+      args: [id, `${app.role_title} (#${app.role_id})`, `${target.title} (#${target.id})`, ctx.user.id, now, ...guardArgs],
     },
-    { sql: 'UPDATE applications SET role_id = ? WHERE id = ? AND role_id = ?', args: [target.id, id, app.role_id] },
-  ]);
-  if (results[1].changes === 0) setFlash(ctx, 'error', STALE);
-  else setFlash(ctx, 'ok', `Moved "${person.name}" to ${target.title}.`);
+  ];
+  if (stageChanges) {
+    statements.push({
+      sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+            SELECT ?, 'stage_change', ?, ?, ?, ? WHERE ${guard}`,
+      args: [id, from.name, to.name, ctx.user.id, now, ...guardArgs],
+    });
+  }
+  statements.push({
+    sql: `UPDATE applications SET role_id = ?, stage_id = ?, stage = ?${stageChanges ? ', stage_changed_at = ?' : ''}
+           WHERE id = ? AND role_id = ? AND stage_id IS ? AND EXISTS (SELECT 1 FROM role_stages WHERE id = ? AND role_id = ?)`,
+    args: [target.id, to.id, legacyCategory(to.kind), ...(stageChanges ? [now] : []), id, app.role_id, app.stage_id, to.id, target.id],
+  });
+  const results = await db.batch(statements);
+  if (results[results.length - 1].changes === 0) setFlash(ctx, 'error', STALE);
+  else setFlash(ctx, 'ok', `Moved "${person.name}" to ${target.title}${stageChanges ? `, stage ${to.name}` : ''}.`);
   ctx.redirect(`/app/applications/${id}`);
 }
 
@@ -545,7 +580,8 @@ async function searchPage(ctx) {
   // A page past the end (a stale link, or results that shrank) goes to the last real page.
   if (pageNo > lastPage) return ctx.redirect(href(lastPage));
   const shown = await db.all(
-    `SELECT a.id, a.stage, a.applied_at, p.name, p.email, r.title AS role_title, r.site_name ${from} ${where}
+    `SELECT a.id, a.stage, a.applied_at, p.name, p.email, r.title AS role_title, r.site_name, s.name AS stage_name, s.kind AS stage_kind
+       ${from} LEFT JOIN role_stages s ON s.id = a.stage_id ${where}
       ORDER BY a.applied_at DESC, a.id DESC LIMIT ? OFFSET ?`,
     [...filterArgs, PAGE_SIZE, (pageNo - 1) * PAGE_SIZE]
   );
@@ -575,7 +611,7 @@ async function searchPage(ctx) {
                   <td class="nowrap"><a href="/app/applications/${a.id}"><strong>${a.name}</strong></a></td>
                   <td class="nowrap">${a.email}</td>
                   <td>${a.role_title}${a.site_name ? html`<span class="cell-sub">${a.site_name}</span>` : ''}</td>
-                  <td><span class="stage-badge stage-${a.stage}">${STAGE_LABELS[a.stage]}</span></td>
+                  <td>${stageBadge({ kind: a.stage_kind || kindOfLegacy(a.stage), name: a.stage_name || LEGACY_LABELS[a.stage] || a.stage })}</td>
                   <td>${fmtDate(ctx, a.applied_at)}</td>
                 </tr>`
               )}

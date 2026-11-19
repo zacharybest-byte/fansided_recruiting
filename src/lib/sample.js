@@ -4,6 +4,8 @@
 // attach to (or collide with) a sample person.
 // Load and Remove are each ONE db.batch. Ids are found with subselects on the unique sample email / role title,
 // so the same statements work on both database drivers.
+const { stageRows, insertStagesWhere, legacyCategory, DEFAULT_PROGRESS } = require('./stages');
+
 const DAY = 86400000;
 const SAMPLE_DOMAIN = 'sample.invalid';
 
@@ -33,6 +35,7 @@ const ROLES = [
   },
   {
     title: 'New York Yankees contributor',
+    progress: ['Reviewing', 'Edit test', 'Trial'],
     vertical: 'MLB',
     site: 'Yanks Go Yard',
     description:
@@ -55,6 +58,7 @@ const ROLES = [
   },
   {
     title: 'Premier League writer',
+    progress: ['Phone screen', 'Trial'],
     vertical: 'Soccer',
     site: 'Playing for 90',
     description:
@@ -77,26 +81,26 @@ const ROLES = [
   },
 ];
 
-// [name, role index, stage, heard from, source tag, days since applied, days in current stage]
+// [name, role index, stage NAME in that role's workflow, heard from, source tag, days since applied, days in current stage]
 const PEOPLE = [
-  ['Marcus Bennett', 0, 'new', 'LinkedIn', 'linkedin', 1, 1],
-  ['Priya Nair', 1, 'new', 'FanSided site', 'site', 2, 2],
-  ['Daniel Okafor', 2, 'new', 'X/Twitter', 'x', 3, 3],
-  ['Hannah Lindqvist', 4, 'new', 'Indeed', 'indeed', 5, 5],
-  ['Tyler Reyes', 3, 'new', 'Referral', 'referral', 6, 6],
-  ['Sofia Marchetti', 5, 'reviewing', 'LinkedIn', 'linkedin', 9, 4],
-  ['Jamal Whitfield', 0, 'reviewing', 'Indeed', 'indeed', 11, 6],
-  ['Emily Carter', 2, 'reviewing', 'X/Twitter', 'x', 14, 8],
-  ['Noah Fitzgerald', 1, 'reviewing', 'Referral', 'referral', 16, 10],
-  ['Aaliyah Brooks', 3, 'trial', 'FanSided site', 'site', 19, 5],
-  ['Connor Walsh', 4, 'trial', 'LinkedIn', 'linkedin', 21, 7],
-  ['Grace Tanaka', 5, 'trial', 'Referral', 'referral', 23, 9],
-  ['Luis Hernandez', 0, 'onboarded', 'X/Twitter', 'x', 26, 12],
-  ['Megan Foster', 2, 'onboarded', 'Indeed', 'indeed', 28, 15],
-  ['Owen Mitchell', 1, 'onboarded', 'LinkedIn', 'linkedin', 30, 18],
-  ['Rachel Goldberg', 3, 'passed', 'Indeed', 'indeed', 17, 8],
-  ['Victor Santos', 4, 'passed', 'FanSided site', 'site', 24, 14],
-  ['Chloe Pierce', 5, 'passed', 'Other', 'other', 29, 20],
+  ['Marcus Bennett', 0, 'New', 'LinkedIn', 'linkedin', 1, 1],
+  ['Priya Nair', 1, 'New', 'FanSided site', 'site', 2, 2],
+  ['Daniel Okafor', 2, 'New', 'X/Twitter', 'x', 3, 3],
+  ['Hannah Lindqvist', 4, 'New', 'Indeed', 'indeed', 5, 5],
+  ['Tyler Reyes', 3, 'New', 'Referral', 'referral', 6, 6],
+  ['Sofia Marchetti', 5, 'Reviewing', 'LinkedIn', 'linkedin', 9, 4],
+  ['Jamal Whitfield', 0, 'Reviewing', 'Indeed', 'indeed', 11, 6],
+  ['Emily Carter', 2, 'Edit test', 'X/Twitter', 'x', 14, 8],
+  ['Noah Fitzgerald', 1, 'Reviewing', 'Referral', 'referral', 16, 10],
+  ['Aaliyah Brooks', 3, 'Trial', 'FanSided site', 'site', 19, 5],
+  ['Connor Walsh', 4, 'Phone screen', 'LinkedIn', 'linkedin', 21, 7],
+  ['Grace Tanaka', 5, 'Trial', 'Referral', 'referral', 23, 9],
+  ['Luis Hernandez', 0, 'Onboarded', 'X/Twitter', 'x', 26, 12],
+  ['Megan Foster', 2, 'Onboarded', 'Indeed', 'indeed', 28, 15],
+  ['Owen Mitchell', 1, 'Onboarded', 'LinkedIn', 'linkedin', 30, 18],
+  ['Rachel Goldberg', 3, 'Passed', 'Indeed', 'indeed', 17, 8],
+  ['Victor Santos', 4, 'Passed', 'FanSided site', 'site', 24, 14],
+  ['Chloe Pierce', 5, 'Passed', 'Other', 'other', 29, 20],
 ];
 
 const ANSWERS = [
@@ -116,14 +120,16 @@ function samplePeople(now) {
   return PEOPLE.map(([name, roleIndex, stage, heard, tag, ago, inStage], i) => {
     const [first, last] = name.toLowerCase().split(' ');
     const role = ROLES[roleIndex];
+    const row = stageRows(role.progress || DEFAULT_PROGRESS).find(([, n]) => n === stage);
     const appliedAt = new Date(now - ago * DAY - (i % 5) * 3600000).toISOString();
-    const changedAt = stage === 'new' ? appliedAt : new Date(now - Math.min(inStage, ago - 1) * DAY).toISOString();
+    const changedAt = stage === 'New' ? appliedAt : new Date(now - Math.min(inStage, ago - 1) * DAY).toISOString();
     return {
       email: `${first}.${last}@${SAMPLE_DOMAIN}`,
       name,
       linkedin: `https://www.linkedin.com/in/${first}-${last}`,
       role,
       stage,
+      kind: row[2],
       heard,
       tag,
       appliedAt,
@@ -159,6 +165,8 @@ async function loadSample(db, actorId, nowMs = Date.now()) {
       args: [r.title, r.vertical, r.site, r.description, actorId, JSON.stringify(r.questions), nowIso, nowIso],
     });
   }
+  // Each sample role gets its workflow (two of them differ from the default so the demo shows the feature).
+  for (const r of ROLES) stmts.push(...insertStagesWhere(r.progress || DEFAULT_PROGRESS, 'title = ? AND is_sample = 1', [r.title], nowIso));
   for (const p of people) {
     stmts.push({
       sql: 'INSERT INTO people (email, name, linkedin_url, is_sample, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)',
@@ -167,12 +175,12 @@ async function loadSample(db, actorId, nowMs = Date.now()) {
   }
   for (const p of people) {
     stmts.push({
-      sql: `INSERT INTO applications (person_id, role_id, stage, sample_links, resume_url, answers_json, heard_from, source_tag, applied_at, stage_changed_at, onboarded_at)
-            SELECT pe.id, r.id, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM people pe, job_roles r WHERE pe.email = ? AND r.title = ? AND r.is_sample = 1`,
-      args: [p.stage, p.links, p.resume, JSON.stringify(p.answers), p.heard, p.tag, p.appliedAt, p.changedAt, p.stage === 'onboarded' ? p.changedAt : null, p.email, p.role.title],
+      sql: `INSERT INTO applications (person_id, role_id, stage, stage_id, sample_links, resume_url, answers_json, heard_from, source_tag, applied_at, stage_changed_at, onboarded_at)
+            SELECT pe.id, r.id, ?, (SELECT s.id FROM role_stages s WHERE s.role_id = r.id AND s.name = ?), ?, ?, ?, ?, ?, ?, ?, ? FROM people pe, job_roles r WHERE pe.email = ? AND r.title = ? AND r.is_sample = 1`,
+      args: [legacyCategory(p.kind), p.stage, p.links, p.resume, JSON.stringify(p.answers), p.heard, p.tag, p.appliedAt, p.changedAt, p.kind === 'onboarded' ? p.changedAt : null, p.email, p.role.title],
     });
-    const events = [[null, 'new', null, p.appliedAt]];
-    if (p.stage !== 'new') events.push(['new', p.stage, actorId, p.changedAt]);
+    const events = [[null, 'New', null, p.appliedAt]];
+    if (p.kind !== 'new') events.push(['New', p.stage, actorId, p.changedAt]);
     for (const [from, to, actor, at] of events) {
       stmts.push({
         sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
@@ -213,6 +221,13 @@ async function removeSample(db) {
     { sql: `DELETE FROM application_events WHERE application_id IN (${sampleAppIds})` },
     { sql: `DELETE FROM applications WHERE person_id IN (${samplePeopleIds})` },
     { sql: 'DELETE FROM people WHERE is_sample = 1' },
+    // Stages of the sample roles that are about to be deleted (same conditions as the delete below).
+    {
+      sql: `DELETE FROM role_stages WHERE role_id IN (SELECT id FROM job_roles WHERE is_sample = 1
+              AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.role_id = job_roles.id)
+              AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.role_id = job_roles.id)
+              AND NOT EXISTS (SELECT 1 FROM emails_sent m WHERE m.role_id = job_roles.id))`,
+    },
     {
       sql: `DELETE FROM job_roles WHERE is_sample = 1
               AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.role_id = job_roles.id)

@@ -15,14 +15,15 @@
     }
   }
 
-  // Show the Voltax fields only when "Onboarded" is picked.
+  // Show the Voltax fields only when the picked stage is the role's Onboarded stage (its option has data-kind).
   document.querySelectorAll('.voltax-fields[data-show-for]').forEach(function (box) {
     var form = box.closest('form');
     var select = form && form.querySelector('select[name="stage"]');
     if (!select) return;
     var update = function () {
       var want = box.getAttribute('data-show-for');
-      box.hidden = select.value !== want;
+      var option = select.options[select.selectedIndex];
+      box.hidden = !option || option.getAttribute('data-kind') !== want;
     };
     select.addEventListener('change', update);
     update();

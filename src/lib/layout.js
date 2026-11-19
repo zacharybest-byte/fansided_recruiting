@@ -4,8 +4,6 @@ const { html } = require('./render');
 const { hmacHex, safeEqual } = require('./crypto');
 const { formatDateFriendly, formatDateTimeFriendly } = require('./time');
 
-const STAGES = ['new', 'reviewing', 'trial', 'onboarded', 'passed'];
-const STAGE_LABELS = { new: 'New', reviewing: 'Reviewing', trial: 'Trial', onboarded: 'Onboarded', passed: 'Passed' };
 const HEARD_FROM = ['LinkedIn', 'Indeed', 'X/Twitter', 'FanSided site', 'Referral', 'Other'];
 
 // The flash cookie is signed (base64url(JSON).HMAC-SHA256 under SESSION_SECRET): anything unsigned or altered is ignored,
@@ -31,6 +29,11 @@ function takeFlash(ctx) {
   } catch {
     return null;
   }
+}
+
+// "● Name" badge for a stage ({ name, kind }). The colour comes from the kind; the name is always printed.
+function stageBadge(stage) {
+  return html`<span class="stage-badge stage-${stage.kind}">${stage.name}</span>`;
 }
 
 // Which primary nav item a path belongs to (marked with aria-current and the accent bar).
@@ -196,4 +199,4 @@ function errorSummary(items, { intro = '' } = {}) {
   </div>`;
 }
 
-module.exports = { page, errorPage, setFlash, STAGES, STAGE_LABELS, HEARD_FROM, fmtDateTime, fmtDate, sourceLabel, errorSummary };
+module.exports = { page, errorPage, setFlash, stageBadge, HEARD_FROM, fmtDateTime, fmtDate, sourceLabel, errorSummary };

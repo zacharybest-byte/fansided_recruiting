@@ -6,7 +6,7 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { DRIVERS, startApp, freshDb, makeUser, makeRole, lastApplication, count } = require('./helpers');
+const { DRIVERS, startApp, freshDb, makeUser, makeRole, lastApplication, count, stageId } = require('./helpers');
 const { startFakeTurso } = require('./fake-turso');
 const { createApp } = require('../src/app');
 const { createTursoDb, pipelineUrl } = require('../src/lib/db/turso');
@@ -407,7 +407,7 @@ for (const driver of DRIVERS) {
         assert.deepEqual(apps.map((a) => a.person_id), [people[0].id, people[0].id, people[1].id]);
         assert.equal(events.length, 3);
         assert.deepEqual(events.map((e) => e.application_id), apps.map((a) => a.id)); // each event points at ITS application
-        assert.ok(events.every((e) => e.type === 'stage_change' && e.from_value === null && e.to_value === 'new' && e.actor_user_id === null));
+        assert.ok(events.every((e) => e.type === 'stage_change' && e.from_value === null && e.to_value === 'New' && e.actor_user_id === null));
         assert.equal(await count(t.db, 'rate_limits'), 3);
       } finally {
         await t.close();
@@ -456,7 +456,7 @@ for (const driver of DRIVERS) {
         await c.get(`/app/applications/${app.id}`);
         const eventsBefore = await t.db.all('SELECT * FROM application_events WHERE application_id = ?', [app.id]);
         raceBeforeNextBatch(t.db, () => t.db.run("UPDATE applications SET stage = 'trial' WHERE id = ?", [app.id]));
-        const res = await c.post(`/app/applications/${app.id}/stage`, { stage: 'reviewing', from_stage: 'new' });
+        const res = await c.post(`/app/applications/${app.id}/stage`, { stage: await stageId(t.db, role, 'reviewing'), from_stage: await stageId(t.db, role, 'new') });
         assert.equal(res.status, 303);
         assert.equal((await lastApplication(t.db)).stage, 'trial'); // the other writer's value stands
         assert.deepEqual(await t.db.all('SELECT * FROM application_events WHERE application_id = ?', [app.id]), eventsBefore); // no event row for the lost move
@@ -465,13 +465,14 @@ for (const driver of DRIVERS) {
         const other = await makeRole(t.db, { title: 'Elsewhere', assigned: rep });
         const third = await makeRole(t.db, { title: 'Third', assigned: rep });
         await c.get(`/app/applications/${app.id}`);
-        raceBeforeNextBatch(t.db, () => t.db.run('UPDATE applications SET role_id = ? WHERE id = ?', [third, app.id]));
+        const thirdTrial = Number(await stageId(t.db, third, 'trial'));
+        raceBeforeNextBatch(t.db, () => t.db.run('UPDATE applications SET role_id = ?, stage_id = ? WHERE id = ?', [third, thirdTrial, app.id]));
         await c.post(`/app/applications/${app.id}/role`, { role_id: String(other), from_role_id: String(role) });
         assert.equal((await lastApplication(t.db)).role_id, third);
         assert.equal(await count(t.db, 'application_events', "type = 'role_change'"), 0);
         // And with the onboarded + Voltax path: neither event is written.
         raceBeforeNextBatch(t.db, () => t.db.run("UPDATE applications SET stage = 'passed' WHERE id = ?", [app.id]));
-        await c.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'trial', voltax_user_id: 'vx-9' });
+        await c.post(`/app/applications/${app.id}/stage`, { stage: await stageId(t.db, third, 'onboarded'), from_stage: String(thirdTrial), voltax_user_id: 'vx-9' });
         assert.equal(await count(t.db, 'application_events', "type = 'voltax_recorded'"), 0);
         assert.equal((await lastApplication(t.db)).voltax_user_id, null);
         assert.equal((await lastApplication(t.db)).stage, 'passed');
@@ -490,14 +491,14 @@ for (const driver of DRIVERS) {
         const c = t.client();
         await c.login('rep@fansided.com');
         await c.get(`/app/applications/${app.id}`);
-        await c.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'new', voltax_user_id: 'vx-1', voltax_onboarded_on: '2026-03-01' });
+        await c.post(`/app/applications/${app.id}/stage`, { stage: await stageId(t.db, role, 'onboarded'), from_stage: await stageId(t.db, role, 'new'), voltax_user_id: 'vx-1', voltax_onboarded_on: '2026-03-01' });
         const row = await lastApplication(t.db);
         assert.equal(row.stage, 'onboarded');
         assert.equal(row.voltax_user_id, 'vx-1');
         assert.equal(row.voltax_onboarded_on, '2026-03-01');
         assert.ok(row.onboarded_at);
         const types = (await t.db.all('SELECT type, from_value, to_value FROM application_events WHERE application_id = ? ORDER BY id', [app.id])).map((e) => `${e.type}:${e.from_value}>${e.to_value}`);
-        assert.deepEqual(types, ['stage_change:null>new', 'stage_change:new>onboarded', 'voltax_recorded:null>vx-1 (onboarded 2026-03-01)']);
+        assert.deepEqual(types, ['stage_change:null>New', 'stage_change:New>Onboarded', 'voltax_recorded:null>vx-1 (onboarded 2026-03-01)']);
         // Recording again takes the previous value from the row itself.
         await c.get(`/app/applications/${app.id}`);
         await c.post(`/app/applications/${app.id}/voltax`, { voltax_user_id: 'vx-2', voltax_onboarded_on: '2026-03-02' });

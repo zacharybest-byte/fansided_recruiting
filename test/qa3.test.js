@@ -2,7 +2,7 @@
 // Regression tests for the third QA round (stale tabs, confirmations, error summaries, mobile menu, wording).
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count, stageId, moveStage } = require('./helpers');
 const { formatDateTimeFriendly } = require('../src/lib/time');
 const { sourceLabel } = require('../src/lib/layout');
 const { nowIso } = require('../src/lib/db');
@@ -46,9 +46,10 @@ for (const driver of DRIVERS) {
     test('B2: stage forms on the board and the candidate page carry from_stage; the role form carries from_role_id', async () => {
       const app = await newApp('forms@example.com');
       const board = await admin.get(`/app/roles/${role}`);
-      assert.match(board.text, /<input type="hidden" name="from_stage" value="new">/);
+      const newId = await stageId(t.db, role, 'new');
+      assert.match(board.text, new RegExp(`<input type="hidden" name="from_stage" value="${newId}">`)); // the stage ID, not its name
       const page = await admin.get(`/app/applications/${app.id}`);
-      assert.match(page.text, /<form method="post" action="\/app\/applications\/\d+\/stage" id="stage-form">[\s\S]*?name="from_stage" value="new"/);
+      assert.match(page.text, /<form method="post" action="\/app\/applications\/\d+\/stage" id="stage-form">[\s\S]*?name="from_stage" value="\d+"/);
       assert.match(page.text, /name="from_role_id" value="\d+"/);
       assert.match(page.text, /<h2>Move to another stage<\/h2>/);
       assert.match(page.text, /<label for="f-stage">Stage<\/label>/);
@@ -61,7 +62,10 @@ for (const driver of DRIVERS) {
       const events = () => count(t.db, 'application_events', 'application_id = ?', app.id);
       const before = await events();
       await admin.get(`/app/applications/${app.id}`);
-      for (const fields of [{ stage: 'passed', from_stage: 'new' }, { stage: 'passed' }, { stage: 'passed', from_stage: 'bogus' }, { stage: 'passed', from_stage: '' }]) {
+      const passed = await stageId(t.db, role, 'passed');
+      const newStage = await stageId(t.db, role, 'new');
+      const otherNew = await stageId(t.db, other, 'new'); // a stage of a different role is never a valid "from"
+      for (const fields of [{ stage: passed, from_stage: newStage }, { stage: passed }, { stage: passed, from_stage: 'bogus' }, { stage: passed, from_stage: '' }, { stage: passed, from_stage: otherNew }, { stage: passed, from_stage: 'new' }]) {
         const res = await admin.post(`/app/applications/${app.id}/stage`, fields);
         assert.equal(res.status, 303, JSON.stringify(fields));
         const [, type, msg] = await flashOf(admin, res);
@@ -75,10 +79,10 @@ for (const driver of DRIVERS) {
     test('B2: choosing the stage it is already in says so and writes no event; a real move quotes the name', async () => {
       const app = await newApp('same@example.com', 'Zed New');
       await admin.get(`/app/applications/${app.id}`);
-      const moved = await admin.post(`/app/applications/${app.id}/stage`, { stage: 'trial', from_stage: 'new' });
+      const moved = await moveStage(admin, t.db, app.id, 'trial', 'new');
       assert.deepEqual((await flashOf(admin, moved)).slice(1), ['ok', 'Moved &quot;Zed New&quot; to Trial.']);
       const n = await count(t.db, 'application_events', 'application_id = ?', app.id);
-      const again = await admin.post(`/app/applications/${app.id}/stage`, { stage: 'trial', from_stage: 'trial' });
+      const again = await moveStage(admin, t.db, app.id, 'trial', 'trial');
       assert.deepEqual((await flashOf(admin, again)).slice(1), ['ok', 'Already in Trial.']);
       assert.equal(await count(t.db, 'application_events', 'application_id = ?', app.id), n);
     });
@@ -87,7 +91,7 @@ for (const driver of DRIVERS) {
       const app = await newApp('empty@example.com');
       const n = await count(t.db, 'application_events', 'application_id = ?', app.id);
       await admin.get(`/app/roles/${role}`);
-      const res = await admin.post(`/app/applications/${app.id}/stage`, { stage: '', from_stage: 'new', return_to: `/app/roles/${role}` });
+      const res = await admin.post(`/app/applications/${app.id}/stage`, { stage: '', from_stage: await stageId(t.db, role, 'new'), return_to: `/app/roles/${role}` });
       assert.equal(res.status, 303);
       assert.equal(res.headers.get('location'), `/app/roles/${role}`);
       assert.deepEqual((await flashOf(admin, res)).slice(1), ['error', 'Choose a stage to move this candidate to.']);
@@ -117,7 +121,7 @@ for (const driver of DRIVERS) {
       assert.equal((page.match(/name="voltax_user_id"/g) || []).length, 1);
       assert.match(page, /Only used when moving to Onboarded\./);
       assert.doesNotMatch(page, /Update Voltax details/);
-      await admin.post(`/app/applications/${app.id}/stage`, { stage: 'onboarded', from_stage: 'new', voltax_user_id: 'vx-42', voltax_onboarded_on: '2026-11-02' });
+      await moveStage(admin, t.db, app.id, 'onboarded', 'new', { voltax_user_id: 'vx-42', voltax_onboarded_on: '2026-11-02' });
       page = (await admin.get(`/app/applications/${app.id}`)).text;
       assert.equal((page.match(/name="voltax_user_id"/g) || []).length, 1, 'only the update form has the field');
       assert.match(page, /action="\/app\/applications\/\d+\/voltax"/);
@@ -137,7 +141,7 @@ for (const driver of DRIVERS) {
       const vxCol = idx.indexOf('voltax_user_id');
       assert.ok((await csv())[onCol]);
       await admin.get(`/app/applications/${app.id}`);
-      await admin.post(`/app/applications/${app.id}/stage`, { stage: 'trial', from_stage: 'onboarded' });
+      await moveStage(admin, t.db, app.id, 'trial', 'onboarded');
       assert.equal(Number(await monthCount()), before - 1);
       const left = await csv();
       assert.equal(left[onCol], '', 'not onboarded: no onboarded_at in the export');
@@ -350,12 +354,13 @@ for (const driver of DRIVERS) {
       assert.match(page, /Chip Role Two/);
     });
 
-    test('A7 + A5 + R3: the stylesheet has readable disabled colours, 44px tap targets and a 3 + 2 stage counter at small widths', async () => {
+    test('A7 + A5 + R3: the stylesheet has readable disabled colours, 44px tap targets and a wrapping stage counter at small widths', async () => {
       const css = (await t.client().get('/public/style.css')).text;
       assert.match(css, /button:disabled[^{]*\{[^}]*color: #6b6b67/);
       assert.doesNotMatch(css, /opacity: 0\.45/);
       assert.match(css, /@media \(max-width: 600px\) \{[^@]*min-height: 2\.75rem/);
-      assert.match(css, /@media \(max-width: 400px\) \{\s*\.stage-counter \{ grid-template-columns: repeat\(3/);
+      assert.match(css, /\.stage-counter \{ list-style: none; display: grid; grid-template-columns: repeat\(auto-fit, minmax\(4\.25rem/);
+      assert.match(css, /@media \(max-width: 400px\) \{ \.stage-counter \{ grid-template-columns: repeat\(auto-fit, minmax\(3\.75rem/);
       assert.match(css, /\.nav-menu \{ display: none; \}/);
     });
   });

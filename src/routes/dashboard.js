@@ -1,7 +1,8 @@
 'use strict';
 // Internal: dashboard, role pipeline, reassign rep, CSV export.
 const { html, raw } = require('../lib/render');
-const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, sourceLabel, errorSummary } = require('../lib/layout');
+const { page, setFlash, fmtDate, sourceLabel, errorSummary } = require('../lib/layout');
+const { stagesByRole, roleStages, stageOf, kindOfLegacy, LEGACY_LABELS } = require('../lib/stages');
 const { requireUser } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
@@ -14,12 +15,6 @@ function idParam(value) {
   return Number(value);
 }
 
-function stageSelect(current, name = 'stage') {
-  return html`<select name="${name}" aria-label="Stage">
-    ${STAGES.map((s) => html`<option value="${s}"${s === current ? raw(' selected') : ''}>${STAGE_LABELS[s]}</option>`)}
-  </select>`;
-}
-
 async function dashboard(ctx) {
   const { db } = ctx.app;
   const showAll = ctx.query.get('view') === 'all';
@@ -30,10 +25,14 @@ async function dashboard(ctx) {
       ORDER BY r.status = 'closed', r.title COLLATE NOCASE`,
     showAll ? [] : [ctx.user.id]
   );
+  // Every role has its own stages; counts are per stage id.
+  const stagesOf = await stagesByRole(db);
   const counts = new Map();
-  for (const row of await db.all('SELECT role_id, stage, COUNT(*) AS n FROM applications GROUP BY role_id, stage')) {
+  for (const row of await db.all('SELECT role_id, stage_id, stage, COUNT(*) AS n FROM applications GROUP BY role_id, stage_id, stage')) {
+    const st = stageOf(row, stagesOf.get(row.role_id) || []);
+    if (!st) continue;
     if (!counts.has(row.role_id)) counts.set(row.role_id, {});
-    counts.get(row.role_id)[row.stage] = row.n;
+    counts.get(row.role_id)[st.id] = (counts.get(row.role_id)[st.id] || 0) + row.n;
   }
   // "+N since your last visit": applications that arrived after the stored stamp users.dashboard_seen_at, which only
   // the explicit "Mark as seen" POST moves (a GET never writes). Until a user has marked something as seen, the
@@ -47,10 +46,15 @@ async function dashboard(ctx) {
   }
   const anythingNew = roles.some((r) => (since.get(r.id) || 0) > 0);
   // Summary strip: totals over the roles on this page (so "My roles" shows my own numbers).
-  const total = (stage) => roles.reduce((n, r) => n + ((counts.get(r.id) || {})[stage] || 0), 0);
+  const total = (kind) =>
+    roles.reduce((n, r) => n + (stagesOf.get(r.id) || []).filter((s) => s.kind === kind).reduce((m, s) => m + ((counts.get(r.id) || {})[s.id] || 0), 0), 0);
   const monthStart = zonedMidnightUtc(`${todayIn(ctx.app.config.timezone).slice(0, 7)}-01`, ctx.app.config.timezone).toISOString();
   const onboardedByRole = new Map();
-  for (const row of await db.all("SELECT role_id, COUNT(*) AS n FROM applications WHERE stage = 'onboarded' AND onboarded_at >= ? GROUP BY role_id", [monthStart])) {
+  for (const row of await db.all(
+    `SELECT a.role_id, COUNT(*) AS n FROM applications a JOIN role_stages s ON s.id = a.stage_id
+      WHERE s.kind = 'onboarded' AND a.onboarded_at >= ? GROUP BY a.role_id`,
+    [monthStart]
+  )) {
     onboardedByRole.set(row.role_id, row.n);
   }
   const onboardedThisMonth = roles.reduce((n, r) => n + (onboardedByRole.get(r.id) || 0), 0);
@@ -58,7 +62,7 @@ async function dashboard(ctx) {
   const summary = [
     ['Open roles', openRoles, false],
     ['New applications', total('new'), total('new') > 0],
-    ['In Trial', total('trial'), false],
+    ['In progress', total('progress'), false],
     ['Onboarded this month', onboardedThisMonth, false],
   ];
   page(ctx, {
@@ -99,10 +103,10 @@ async function dashboard(ctx) {
                 </div>
                 <div class="role-row-counter">
                   <ol class="stage-counter" aria-label="Candidates by stage">
-                    ${STAGES.map((s) => {
-                      const n = c[s] || 0;
-                      const cls = `stage-seg stage-${s}${s === 'new' && n > 0 ? ' is-hot' : ''}${n === 0 ? ' is-zero' : ''}`;
-                      return html`<li class="${cls}" data-stage="${s}"><span class="stage-seg-n">${n}</span><span class="stage-seg-l">${STAGE_LABELS[s]}</span></li>`;
+                    ${(stagesOf.get(r.id) || []).map((s) => {
+                      const n = c[s.id] || 0;
+                      const cls = `stage-seg stage-${s.kind}${s.kind === 'new' && n > 0 ? ' is-hot' : ''}${n === 0 ? ' is-zero' : ''}`;
+                      return html`<li class="${cls}" data-stage="${s.id}" data-kind="${s.kind}"><span class="stage-seg-n">${n}</span><span class="stage-seg-l">${s.name}</span></li>`;
                     })}
                   </ol>
                   ${fresh ? html`<span class="since" data-since="${fresh}">+${fresh} since your last visit</span>` : ''}
@@ -128,11 +132,13 @@ async function rolePipeline(ctx) {
   if (!role) throw new HttpError(404, 'Role not found');
   const users = await db.all('SELECT id, name, email FROM users WHERE active = 1 ORDER BY name COLLATE NOCASE, email');
   const apps = await db.all(
-    `SELECT a.id, a.stage, a.applied_at, a.stage_changed_at, a.source_tag, p.name, p.email
+    `SELECT a.id, a.stage, a.stage_id, a.applied_at, a.stage_changed_at, a.source_tag, p.name, p.email
        FROM applications a JOIN people p ON p.id = a.person_id
       WHERE a.role_id = ? ORDER BY a.applied_at DESC`,
     [roleId]
   );
+  const stages = await roleStages(db, roleId);
+  for (const a of apps) a.stageRow = stageOf(a, stages);
   const returnTo = `/app/roles/${roleId}`;
   const isAdmin = ctx.user.role === 'admin';
   page(ctx, {
@@ -166,16 +172,17 @@ async function rolePipeline(ctx) {
         </form>
         <span class="meta">${apps.length} ${apps.length === 1 ? 'candidate' : 'candidates'} in this pipeline</span>
       </div>
-      <div class="board">
-      ${STAGES.map((stage) => {
-        const list = apps.filter((a) => a.stage === stage);
-        return html`<section class="board-col stage-${stage}" id="stage-${stage}" data-stage="${stage}" aria-labelledby="h-${stage}">
+      ${stages.length > 5 ? html`<p class="board-hint">This workflow has ${stages.length} stages. Scroll the board sideways to see them all.</p>` : ''}
+      <div class="board" data-columns="${stages.length}" tabindex="0" role="region" aria-label="Pipeline stages, scrolls sideways">
+      ${stages.map((stage) => {
+        const list = apps.filter((a) => a.stageRow.id === stage.id);
+        return html`<section class="board-col stage-${stage.kind}" id="stage-${stage.id}" data-stage="${stage.id}" data-kind="${stage.kind}" aria-labelledby="h-${stage.id}">
           <div class="board-col-head">
-            <h2 id="h-${stage}">${STAGE_LABELS[stage]}</h2>
+            <h2 id="h-${stage.id}">${stage.name}</h2>
             <span class="board-count${list.length === 0 ? ' is-zero' : ''}">${list.length}</span>
           </div>
           ${list.length === 0
-            ? html`<p class="board-empty">No candidates in ${STAGE_LABELS[stage]}.</p>`
+            ? html`<p class="board-empty">No candidates in ${stage.name}.</p>`
             : html`<ul class="board-list">
                 ${list.map(
                   (a) => html`<li class="cand-card" data-application-id="${a.id}">
@@ -189,10 +196,10 @@ async function rolePipeline(ctx) {
                     <form method="post" action="/app/applications/${a.id}/stage" class="cand-move">
                       ${csrfField(ctx)}
                       <input type="hidden" name="return_to" value="${returnTo}">
-                      <input type="hidden" name="from_stage" value="${a.stage}">
+                      <input type="hidden" name="from_stage" value="${a.stageRow.id}">
                       <select name="stage" aria-label="Move ${a.name} to stage" required>
                         <option value="">Move to…</option>
-                        ${STAGES.filter((s) => s !== a.stage).map((s) => html`<option value="${s}">${STAGE_LABELS[s]}</option>`)}
+                        ${stages.filter((s) => s.id !== a.stageRow.id).map((s) => html`<option value="${s.id}">${s.name}</option>`)}
                       </select>
                       <button type="submit" aria-label="Move ${a.name} to the selected stage">Move</button>
                     </form>
@@ -242,7 +249,7 @@ function exportPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
 
 const CSV_COLUMNS = [
   'application_id', 'applied_at', 'name', 'email', 'role_title', 'vertical', 'site_name', 'assigned_rep',
-  'source_tag', 'heard_from', 'stage', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url',
+  'source_tag', 'heard_from', 'stage', 'stage_kind', 'stage_changed_at', 'onboarded_at', 'voltax_user_id', 'linkedin_url',
 ];
 
 async function exportCsv(ctx) {
@@ -269,33 +276,40 @@ async function exportCsv(ctx) {
   }
   const rows = await db.all(
     `SELECT a.*, p.name, p.email, p.linkedin_url, r.title AS role_title, r.vertical, r.site_name,
-            COALESCE(NULLIF(u.name, ''), u.email, '') AS assigned_rep
+            COALESCE(NULLIF(u.name, ''), u.email, '') AS assigned_rep,
+            s.name AS stage_name, s.kind AS stage_kind
        FROM applications a
        JOIN people p ON p.id = a.person_id
+       LEFT JOIN role_stages s ON s.id = a.stage_id
        JOIN job_roles r ON r.id = a.role_id
        LEFT JOIN users u ON u.id = r.assigned_user_id
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY a.applied_at, a.id`,
     args
   );
-  const data = rows.map((a) => [
-    a.id,
-    formatDateTime(a.applied_at, tz),
-    a.name,
-    a.email,
-    a.role_title,
-    a.vertical,
-    a.site_name,
-    a.assigned_rep,
-    a.source_tag,
-    a.heard_from,
-    a.stage,
-    formatDateTime(a.stage_changed_at, tz),
-    // onboarded_at is kept when a candidate leaves Onboarded (so coming back is a clean record) but is only exported while onboarded.
-    a.stage === 'onboarded' ? formatDateTime(a.onboarded_at, tz) : '',
-    a.voltax_user_id || '',
-    a.linkedin_url,
-  ]);
+  const data = rows.map((a) => {
+    const kind = a.stage_kind || kindOfLegacy(a.stage);
+    const name = a.stage_name || LEGACY_LABELS[a.stage] || a.stage;
+    return [
+      a.id,
+      formatDateTime(a.applied_at, tz),
+      a.name,
+      a.email,
+      a.role_title,
+      a.vertical,
+      a.site_name,
+      a.assigned_rep,
+      a.source_tag,
+      a.heard_from,
+      name,
+      kind,
+      formatDateTime(a.stage_changed_at, tz),
+      // onboarded_at is kept when a candidate leaves Onboarded (so coming back is a clean record) but is only exported while onboarded.
+      kind === 'onboarded' ? formatDateTime(a.onboarded_at, tz) : '',
+      a.voltax_user_id || '',
+      a.linkedin_url,
+    ];
+  });
   const filename = `fansided-applications-${todayIn(tz)}.csv`;
   // A UTF-8 byte order mark makes Excel read accented names correctly.
   ctx.send(200, `\ufeff${toCsv(CSV_COLUMNS, data)}`, {
@@ -313,4 +327,4 @@ function register(router) {
   router.get('/app/export.csv', requireUser, exportCsv);
 }
 
-module.exports = { register, idParam, stageSelect, CSV_COLUMNS };
+module.exports = { register, idParam, CSV_COLUMNS };

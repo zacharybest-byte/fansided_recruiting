@@ -11,6 +11,7 @@ const { randomToken, sha256Hex } = require('../lib/crypto');
 const { idParam } = require('./dashboard');
 const { rateKey } = require('../lib/ratelimit');
 const { loadSample, removeSample, sampleCounts, ROLES, PEOPLE_COUNT } = require('../lib/sample');
+const wf = require('../lib/stages');
 
 const MAX_QUESTIONS = 5;
 
@@ -120,23 +121,172 @@ async function rolesPage(ctx) {
       </div>
       ${roles.length === 0
         ? html`<div class="empty"><h2>No roles yet</h2><p>Create a role to open applications for it.</p><p><a class="btn btn-primary" href="/app/admin/roles/new">Create the first role</a></p></div>`
-        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th></tr></thead><tbody>
+        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
         ${roles.map(
           (r) => html`<tr><td><a href="/app/admin/roles/${r.id}"><strong>${r.title}</strong></a></td><td>${r.vertical}</td><td>${r.site_name}</td>
             <td><span class="status status-${r.status}">${r.status === 'open' ? 'Open' : 'Closed'}</span></td><td>${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</td>
-            <td class="num"><a href="/app/roles/${r.id}">${r.n}</a></td></tr>`
+            <td class="num"><a href="/app/roles/${r.id}">${r.n}</a></td>
+            <td><div class="row-actions"><a href="/app/admin/roles/${r.id}">Edit</a><a href="/app/admin/roles/new?copy=${r.id}">Duplicate<span class="visually-hidden"> ${r.title}</span></a></div></td></tr>`
         )}
       </tbody></table></div>`}`,
   });
 }
 
-async function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
+// ---------- Workflow (stages) editor ----------
+// No-JS editor: MAX_PROGRESS rows are always rendered (the role's custom stages first, then blank spare rows).
+// A row with a name is kept, a row of an existing stage with its name cleared is removed, "Position" orders the rows.
+// stage_slots=1 says the form carried the editor at all; without it the workflow is left exactly as it is.
+
+function slotsFromNames(names) {
+  const slots = names.slice(0, wf.MAX_PROGRESS).map((name, i) => ({ id: '', name, pos: String(i + 1) }));
+  while (slots.length < wf.MAX_PROGRESS) slots.push({ id: '', name: '', pos: '' });
+  return slots;
+}
+
+function slotsFromStages(stages) {
+  const slots = stages.filter((s) => s.kind === 'progress').map((s, i) => ({ id: String(s.id), name: s.name, pos: String(i + 1) }));
+  while (slots.length < wf.MAX_PROGRESS) slots.push({ id: '', name: '', pos: '' });
+  return slots;
+}
+
+// Reads the editor rows. `existing` = the role's current stages (null for a new role).
+// Returns { present, slots (as submitted, for re-rendering), keep: [{id|null, name, position}], removed: [stage], ids, errors }.
+function readWorkflow(form, existing, counts = new Map()) {
+  const out = { present: form.get('stage_slots') === '1', slots: [], keep: [], removed: [], ids: [], errors: {} };
+  if (!out.present) return out;
+  const known = existing ? existing.filter((s) => s.kind === 'progress') : [];
+  const seen = new Set();
+  const rows = [];
+  for (let i = 0; i < wf.MAX_PROGRESS; i++) {
+    const slot = { id: form.get(`stage_id_${i}`).trim(), name: wf.cleanName(form.get(`stage_name_${i}`)), pos: form.get(`stage_pos_${i}`).trim() };
+    out.slots.push(slot);
+    const err = (text) => {
+      if (!out.errors[`stage_${i}`]) out.errors[`stage_${i}`] = text;
+    };
+    const prior = slot.id ? known.find((s) => String(s.id) === slot.id) : null;
+    if (slot.id && (!prior || seen.has(prior.id))) {
+      out.errors.workflow = 'The workflow was changed by someone else while you were editing. Nothing was saved: reload this page and try again.';
+      continue;
+    }
+    if (prior) seen.add(prior.id);
+    if (!slot.name) {
+      if (prior) {
+        out.removed.push(prior);
+        const n = counts.get(prior.id) || 0;
+        if (n > 0) err(`Move the ${wf.countWord(n)} out of ${prior.name} before removing it.`);
+      }
+      continue;
+    }
+    if (/[\u0000-\u001f\u007f]/.test(slot.name)) err('Stage names cannot contain control characters.');
+    else if (slot.name.length > wf.NAME_MAX) err(`Stage names must be at most ${wf.NAME_MAX} characters.`);
+    let pos = i + 1;
+    if (slot.pos) {
+      if (!/^\d{1,2}$/.test(slot.pos) || Number(slot.pos) < 1) err('Position must be a whole number from 1 to 99.');
+      else pos = Number(slot.pos);
+    }
+    rows.push({ id: prior ? prior.id : null, name: slot.name, pos, slot: i });
+  }
+  // Names: unique within the role (case-insensitive) and not one of the three fixed names.
+  const names = new Map();
+  for (const row of rows) {
+    const key = row.name.toLowerCase();
+    const slotKey = `stage_${row.slot}`;
+    if (Object.values(wf.FIXED_NAMES).some((n) => n.toLowerCase() === key)) {
+      out.errors[slotKey] = out.errors[slotKey] || `"${row.name}" is a fixed stage of every role. Pick a different name.`;
+    } else if (names.has(key)) {
+      out.errors[slotKey] = out.errors[slotKey] || `"${row.name}" is already used in this workflow. Stage names must be different.`;
+    }
+    names.set(key, row.slot);
+  }
+  rows.sort((a, b) => a.pos - b.pos || a.slot - b.slot);
+  out.keep = rows.map((row, i) => ({ id: row.id, name: row.name, position: i + 1, slot: row.slot }));
+  if (existing) {
+    out.ids = form.get('stage_ids').split(',').map((v) => v.trim()).filter((v) => /^[1-9]\d{0,15}$/.test(v)).map(Number);
+    const current = existing.map((s) => s.id).sort((a, b) => a - b);
+    const sent = [...new Set(out.ids)].sort((a, b) => a - b);
+    if (current.length !== sent.length || current.some((v, i) => v !== sent[i])) {
+      out.errors.workflow = 'The workflow was changed by someone else while you were editing. Nothing was saved: reload this page and try again.';
+    }
+  }
+  return out;
+}
+
+// The statements that bring an existing role's stages to the submitted state. They run in the SAME batch as the role's own
+// UPDATE; the guards come first and abort the whole batch if the world changed since the form was read.
+function workflowStatements(roleId, existing, w, now) {
+  const statements = [];
+  const idList = existing.map((s) => s.id);
+  statements.push(
+    wf.abortIf(
+      `(SELECT COUNT(*) FROM role_stages WHERE role_id = ?) != ? OR EXISTS (SELECT 1 FROM role_stages WHERE role_id = ? AND id NOT IN (${idList.map(() => '?').join(', ')}))`,
+      [roleId, idList.length, roleId, ...idList]
+    )
+  );
+  if (w.removed.length) {
+    statements.push(
+      wf.abortIf(`EXISTS (SELECT 1 FROM applications WHERE stage_id IN (${w.removed.map(() => '?').join(', ')}))`, w.removed.map((s) => s.id))
+    );
+  }
+  return {
+    guards: statements,
+    apply: [
+      ...w.removed.map((s) => ({
+        sql: "DELETE FROM role_stages WHERE id = ? AND role_id = ? AND kind = 'progress' AND NOT EXISTS (SELECT 1 FROM applications WHERE stage_id = role_stages.id)",
+        args: [s.id, roleId],
+      })),
+      ...w.keep
+        .filter((k) => k.id)
+        .map((k) => ({ sql: "UPDATE role_stages SET name = ?, position = ? WHERE id = ? AND role_id = ? AND kind = 'progress'", args: [k.name, k.position, k.id, roleId] })),
+      { sql: "UPDATE role_stages SET position = 0 WHERE role_id = ? AND kind = 'new'", args: [roleId] },
+      { sql: "UPDATE role_stages SET position = ? WHERE role_id = ? AND kind = 'onboarded'", args: [w.keep.length + 1, roleId] },
+      { sql: "UPDATE role_stages SET position = ? WHERE role_id = ? AND kind = 'passed'", args: [w.keep.length + 2, roleId] },
+      ...w.keep
+        .filter((k) => !k.id)
+        .map((k) => ({ sql: "INSERT INTO role_stages (role_id, position, name, kind, created_at) VALUES (?, ?, ?, 'progress', ?)", args: [roleId, k.position, k.name, now] })),
+    ],
+  };
+}
+
+function workflowSection(errors, slots, stages, counts) {
+  const fixedRow = (name, note, st) => html`<li class="stage-edit-row is-fixed"><span class="stage-edit-fixed"><span class="stage-dot stage-${st}" aria-hidden="true"></span><strong>${name}</strong></span><span class="stage-edit-note">${note}</span></li>`;
+  return html`<fieldset class="form-section" id="workflow">
+    <legend>Workflow</legend>
+    <p class="help" id="help-workflow">Candidates move through these stages from top to bottom. New, Onboarded and Passed are the same for every role. Add up to ${wf.MAX_PROGRESS} stages of your own in between: fill in a blank row. Remove one by clearing its name. Position sets the order.</p>
+    ${errors.workflow ? html`<p class="error" id="err-workflow" role="alert">${errors.workflow}</p>` : ''}
+    <input type="hidden" name="stage_slots" value="1">
+    <input type="hidden" name="stage_ids" value="${stages.map((s) => s.id).join(',')}">
+    <ol class="stage-edit">
+      ${fixedRow('New', 'Fixed. Every application starts here.', 'new')}
+      ${slots.map((sl, i) => {
+        const n = sl.id ? counts.get(Number(sl.id)) || 0 : 0;
+        return html`<li class="stage-edit-row${errors[`stage_${i}`] ? ' has-error' : ''}">
+          <input type="hidden" name="stage_id_${i}" value="${sl.id}">
+          <div class="field stage-edit-name"><label for="f-stage-name-${i}">Stage ${i + 1}${sl.id ? '' : ' (blank row adds a stage)'}</label>
+            <input type="text" id="f-stage-name-${i}" name="stage_name_${i}" maxlength="${wf.NAME_MAX * 2}" value="${sl.name}" autocomplete="off"${errors[`stage_${i}`] ? html` aria-invalid="true" aria-describedby="err-stage-${i}"` : ''}>
+            ${sl.id && n ? html`<p class="help">${wf.countWord(n)} here</p>` : ''}</div>
+          <div class="field stage-edit-pos"><label for="f-stage-pos-${i}">Position</label>
+            <input type="number" inputmode="numeric" min="1" max="99" id="f-stage-pos-${i}" name="stage_pos_${i}" value="${sl.pos}"></div>
+          ${errors[`stage_${i}`] ? html`<p class="error" id="err-stage-${i}">${errors[`stage_${i}`]}</p>` : ''}
+        </li>`;
+      })}
+      ${fixedRow('Onboarded', 'Fixed. The Voltax details are recorded here.', 'onboarded')}
+      ${fixedRow('Passed', 'Fixed. Candidates who will not move forward.', 'passed')}
+    </ol>
+  </fieldset>`;
+}
+
+async function roleForm(ctx, r, { errors = {}, status = 200, notice = '' } = {}) {
   const { db } = ctx.app;
   const isNew = !r.id;
   const verticals = await db.all("SELECT DISTINCT vertical FROM job_roles WHERE vertical != '' ORDER BY vertical COLLATE NOCASE");
   const users = await db.all('SELECT id, name, email, active FROM users ORDER BY name COLLATE NOCASE, email');
   const questions = [...(r.questions || [])];
   while (questions.length < MAX_QUESTIONS) questions.push({ text: '', required: false });
+  // Workflow: the role's own stages when editing, the default (or a copied) list when new.
+  const stages = isNew ? [] : await wf.roleStages(db, r.id);
+  const counts = new Map();
+  if (!isNew) for (const row of await db.all('SELECT stage_id, COUNT(*) AS n FROM applications WHERE role_id = ? GROUP BY stage_id', [r.id])) counts.set(row.stage_id, row.n);
+  const slots = r.slots || (isNew ? slotsFromNames(r.progressNames || wf.DEFAULT_PROGRESS) : slotsFromStages(stages));
   page(ctx, {
     title: isNew ? 'New role' : 'Edit role',
     status,
@@ -145,7 +295,8 @@ async function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
         <div><h1>${isNew ? 'New role' : `Edit ${r.title}`}</h1></div>
         ${isNew ? '' : html`<div class="page-actions">${r.status === 'open' ? html`<a class="btn btn-secondary" href="/roles/${r.id}">View public page</a>` : ''}<a class="btn btn-secondary" href="/app/roles/${r.id}">Open pipeline</a></div>`}
       </div>
-      ${summaryFor(errors, { questions: 'f-q0' })}
+      ${summaryFor(errors, { questions: 'f-q0', workflow: 'f-stage-name-0', ...Object.fromEntries(slots.map((_, i) => [`stage_${i}`, `f-stage-name-${i}`])) })}
+      ${notice ? html`<p class="flash flash-ok" id="copy-notice">${notice}</p>` : ''}
       <form method="post" action="${isNew ? '/app/admin/roles' : `/app/admin/roles/${r.id}`}" class="stack-form">
         ${csrfField(ctx)}
         <fieldset class="form-section">
@@ -174,6 +325,7 @@ async function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
             </select>`)}
           </div>
         </fieldset>
+        ${workflowSection(errors, slots, stages, counts)}
         <fieldset class="form-section">
           <legend>Questionnaire</legend>
           <p class="help">Up to ${MAX_QUESTIONS} questions applicants answer. Leave a row blank to skip it.${isNew ? '' : ' Editing questions does not change answers already submitted.'}</p>
@@ -465,30 +617,91 @@ function register(router) {
 
   // Roles
   router.get('/app/admin/roles', ...A, rolesPage);
-  router.get('/app/admin/roles/new', ...A, (ctx) => roleForm(ctx, { status: 'open', assigned_user_id: ctx.user.id, questions: [] }));
+  router.get('/app/admin/roles/new', ...A, async (ctx) => {
+    // ?copy=<id> pre-fills the form from an existing role (nothing is created until the admin saves). Anything that is not
+    // the id of an existing role gives the plain empty form.
+    const { db } = ctx.app;
+    const copyId = ctx.query.get('copy') || '';
+    const source = /^[1-9]\d{0,15}$/.test(copyId) ? await db.get('SELECT * FROM job_roles WHERE id = ?', [Number(copyId)]) : null;
+    if (!source) return roleForm(ctx, { status: 'open', assigned_user_id: ctx.user.id, questions: [] });
+    const stages = await wf.roleStages(db, source.id);
+    const rep = source.assigned_user_id ? await db.get('SELECT id FROM users WHERE id = ? AND active = 1', [source.assigned_user_id]) : null;
+    let questions = [];
+    try {
+      questions = JSON.parse(source.questions_json || '[]');
+    } catch {
+      questions = [];
+    }
+    return roleForm(
+      ctx,
+      {
+        title: `Copy of ${source.title}`.slice(0, 200),
+        vertical: source.vertical,
+        site_name: source.site_name,
+        description: source.description,
+        status: 'closed',
+        assigned_user_id: rep ? rep.id : null,
+        questions,
+        progressNames: stages.filter((s) => s.kind === 'progress').map((s) => s.name),
+      },
+      { notice: `You are copying "${source.title}": its description, questions, workflow and rep are filled in. Candidates are not copied. The copy starts as Closed so it is not published by accident. Nothing is created until you save.` }
+    );
+  });
   router.post('/app/admin/roles', ...AP, async (ctx) => {
     const { db } = ctx.app;
     const { r, errors } = readRole(ctx);
+    const w = readWorkflow(ctx.form, null);
+    Object.assign(errors, w.errors);
     await checkAssignee(db, r, errors, null);
-    if (Object.keys(errors).length) return roleForm(ctx, r, { errors, status: 400 });
+    if (Object.keys(errors).length) return roleForm(ctx, { ...r, slots: w.present ? w.slots : undefined }, { errors, status: 400 });
     const now = nowIso();
-    const res = await db.run(
-      'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, now]
-    );
+    const progress = w.present ? w.keep.map((k) => k.name) : wf.DEFAULT_PROGRESS;
+    // The role and its stages are one atomic batch: a role never exists without its workflow.
+    const results = await db.batch([
+      {
+        sql: 'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        args: [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, now],
+      },
+      ...wf.insertStagesAfterRole(progress, now),
+    ]);
     setFlash(ctx, 'ok', 'Role created.');
-    ctx.redirect(`/app/admin/roles/${res.lastInsertRowid}`);
+    ctx.redirect(`/app/admin/roles/${results[0].lastInsertRowid}`);
   });
   router.get('/app/admin/roles/:id', ...A, async (ctx) => roleForm(ctx, await getRole(ctx.app.db, ctx.params.id)));
   router.post('/app/admin/roles/:id', ...AP, async (ctx) => {
     const { db } = ctx.app;
     const existing = await getRole(db, ctx.params.id);
+    const stages = await wf.roleStages(db, existing.id);
+    const counts = new Map();
+    for (const row of await db.all('SELECT stage_id, COUNT(*) AS n FROM applications WHERE role_id = ? GROUP BY stage_id', [existing.id])) counts.set(row.stage_id, row.n);
     const { r, errors } = readRole(ctx);
+    const w = readWorkflow(ctx.form, stages, counts);
+    Object.assign(errors, w.errors);
     await checkAssignee(db, r, errors, existing.assigned_user_id);
-    if (Object.keys(errors).length) return roleForm(ctx, { ...r, id: existing.id }, { errors, status: 400 });
-    await db.run('UPDATE job_roles SET title = ?, vertical = ?, site_name = ?, description = ?, status = ?, assigned_user_id = ?, questions_json = ?, updated_at = ? WHERE id = ?', [
-      r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), nowIso(), existing.id,
-    ]);
+    if (Object.keys(errors).length) return roleForm(ctx, { ...r, id: existing.id, slots: w.present ? w.slots : undefined }, { errors, status: 400 });
+    const now = nowIso();
+    const roleUpdate = {
+      sql: 'UPDATE job_roles SET title = ?, vertical = ?, site_name = ?, description = ?, status = ?, assigned_user_id = ?, questions_json = ?, updated_at = ? WHERE id = ?',
+      args: [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, existing.id],
+    };
+    // Role fields and workflow are ONE batch. The guards come first: if the set of stages changed, or a stage being
+    // removed has gained a candidate, since the form was read, the batch aborts and nothing at all is saved.
+    const statements = [roleUpdate];
+    if (w.present) {
+      const ws = workflowStatements(existing.id, stages, w, now);
+      statements.unshift(...ws.guards);
+      statements.push(...ws.apply);
+    }
+    try {
+      await db.batch(statements);
+    } catch (err) {
+      if (!wf.isGuardFailure(err)) throw err;
+      return roleForm(
+        ctx,
+        { ...r, id: existing.id, slots: w.slots },
+        { errors: { workflow: 'The workflow was changed by someone else (or a candidate moved into a stage you removed) while you were saving. Nothing was saved: reload this page and try again.' }, status: 409 }
+      );
+    }
     setFlash(ctx, 'ok', 'Role saved.');
     ctx.redirect(`/app/admin/roles/${existing.id}`);
   });
