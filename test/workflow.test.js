@@ -655,3 +655,28 @@ for (const driver of DRIVERS) describe(`[${driver}] workflows`, () => {
     assert.match(form.text, /<option value="" selected>Unassigned<\/option>|<option value="">Unassigned<\/option>/);
   });
 });
+
+// QA F-04: Voltax details can only be recorded for a candidate in an Onboarded stage, even with a hand-made request.
+for (const driver of DRIVERS) test(`[${driver}] F-04: POST /voltax is refused unless the candidate is onboarded`, async () => {
+  const t = await startApp({ driver });
+  try {
+    const admin = t.client();
+    await admin.login('admin@fansided.com');
+    const roleId = await makeRole(t.db, { title: 'F04 role' });
+    await t.db.run("INSERT INTO people (email, name, created_at, updated_at) VALUES ('vera.voltax@example.com', 'Vera Voltax', ?, ?)", [new Date().toISOString(), new Date().toISOString()]);
+    const person = await t.db.get("SELECT id FROM people WHERE email = 'vera.voltax@example.com'");
+    await t.db.run(
+      "INSERT INTO applications (person_id, role_id, stage, stage_id, applied_at, stage_changed_at) VALUES (?, ?, 'new', ?, ?, ?)",
+      [person.id, roleId, await stageId(t.db, roleId, 'New'), new Date().toISOString(), new Date().toISOString()],
+    );
+    const a = await t.db.get('SELECT id FROM applications WHERE person_id = ?', [person.id]);
+    await admin.get(`/app/applications/${a.id}`);
+    const res = await admin.post(`/app/applications/${a.id}/voltax`, { voltax_user_id: 'V-1', voltax_onboarded_on: '2026-11-19' });
+    assert.equal(res.status, 303);
+    const row = await t.db.get('SELECT voltax_user_id FROM applications WHERE id = ?', [a.id]);
+    assert.equal(row.voltax_user_id, null);
+    assert.equal((await t.db.get("SELECT COUNT(*) AS n FROM application_events WHERE type = 'voltax_recorded'")).n, 0);
+  } finally {
+    await t.close();
+  }
+});

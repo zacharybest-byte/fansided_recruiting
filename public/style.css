@@ -760,3 +760,6 @@ main:focus { outline: none; }
   .check { min-height: 2.75rem; }
   .check input { width: 1.4rem; height: 1.4rem; }
 }
+
+/* Long unbroken titles (role names, headings) must wrap instead of widening the page. */
+h1, h2, h3, .board-col-head, .role-title, .history-title { overflow-wrap: anywhere; min-width: 0; }

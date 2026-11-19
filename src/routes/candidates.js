@@ -481,11 +481,25 @@ async function recordVoltax(ctx) {
   await db.batch([
     {
       sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
-            SELECT id, 'voltax_recorded', voltax_user_id, ?, ?, ? FROM applications WHERE id = ?`,
+            SELECT id, 'voltax_recorded', voltax_user_id, ?, ?, ? FROM applications
+            WHERE id = ? AND stage_id IN (SELECT id FROM role_stages WHERE kind = 'onboarded')`,
       args: [`${voltaxId} (onboarded ${on})`, ctx.user.id, nowIso(), id],
     },
-    { sql: 'UPDATE applications SET voltax_user_id = ?, voltax_onboarded_on = ? WHERE id = ?', args: [voltaxId, on, id] },
+    {
+      sql: `UPDATE applications SET voltax_user_id = ?, voltax_onboarded_on = ?
+            WHERE id = ? AND stage_id IN (SELECT id FROM role_stages WHERE kind = 'onboarded')`,
+      args: [voltaxId, on, id],
+    },
   ]);
+  const saved = await db.get(
+    "SELECT 1 AS x FROM applications WHERE id = ? AND stage_id IN (SELECT id FROM role_stages WHERE kind = 'onboarded')",
+    [id],
+  );
+  if (!saved) {
+    // Voltax details belong to onboarded candidates only; nothing was written for anyone else.
+    setFlash(ctx, 'error', 'Move this candidate to Onboarded before recording Voltax details.');
+    return ctx.redirect(`/app/applications/${id}`);
+  }
   setFlash(ctx, 'ok', 'Voltax details saved.');
   ctx.redirect(`/app/applications/${id}`);
 }
