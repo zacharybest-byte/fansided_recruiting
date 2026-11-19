@@ -153,7 +153,7 @@ for (const driver of DRIVERS) {
           assert.ok(mine, `${ROLES[i][0]}: has a questionnaire`);
           assert.equal(mine.questions_json, ROLES[i][1], `${ROLES[i][0]}: questions copied verbatim`);
           assert.equal(role.questions_json, ROLES[i][1], 'legacy storage untouched');
-          assert.equal(mine.is_sample, 0);
+          assert.equal(mine.is_sample, ROLES[i][2] ? 1 : 0, 'a sample role gives a sample questionnaire, so Remove sample data cleans it up');
           assert.ok(mine.created_at && mine.updated_at);
           assert.equal(qs.filter((x) => x.questionnaire_id === mine.id).length, 0);
         });

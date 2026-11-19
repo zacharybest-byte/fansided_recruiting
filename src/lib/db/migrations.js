@@ -275,7 +275,7 @@ function questionnaireMigration() {
     'CREATE INDEX job_roles_questionnaire ON job_roles(questionnaire_id)',
     {
       sql: `INSERT INTO questionnaires (name, questions_json, is_sample, created_at, updated_at)
-            SELECT ${backfillName('r')}, r.questions_json, 0, ?, ?
+            SELECT ${backfillName('r')}, r.questions_json, r.is_sample, ?, ?
               FROM job_roles r WHERE ${hasQuestions('r.questions_json')} ORDER BY r.id`,
       args: [now, now],
     },
