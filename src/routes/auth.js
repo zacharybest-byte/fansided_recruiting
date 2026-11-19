@@ -110,8 +110,20 @@ async function loginSubmit(ctx) {
 
 async function setupAvailable(ctx, token) {
   const { config, db } = ctx.app;
-  if (!config.adminEmail || !config.setupToken || !safeEqual(token, config.setupToken)) return false;
+  // The refusal reason goes to the log (never to the page) so a failed first setup can be diagnosed.
+  // It contains lengths only, never the token or the email.
+  const given = String(token || '');
+  let reason = '';
+  if (!config.adminEmail) reason = 'ADMIN_EMAIL is missing or not a valid address';
+  else if (!config.setupToken) reason = 'SETUP_TOKEN is missing, shorter than 32 characters or has fewer than 10 distinct characters';
+  else if (!given) reason = 'the link has no token (expected /setup?token=...)';
+  else if (!safeEqual(given, config.setupToken)) reason = `the token in the link (${given.length} characters) does not match SETUP_TOKEN (${config.setupToken.length} characters)`;
+  if (reason) {
+    ctx.app.log(`[setup] refused: ${reason}`);
+    return false;
+  }
   const row = await db.get("SELECT 1 AS x FROM users WHERE role = 'admin' AND active = 1 AND password_hash IS NOT NULL LIMIT 1");
+  if (row) ctx.app.log('[setup] refused: an admin with a password already exists (sign in at /login)');
   return !row;
 }
 

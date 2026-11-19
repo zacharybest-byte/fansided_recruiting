@@ -13,19 +13,20 @@ const { dummyHash } = require('./lib/password');
 
 const STATIC_TYPES = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
-// The two assets are read by literal path so Vercel's file tracer bundles them with whichever file it uses as
-// the function entry point. A missing file is tolerated: the request falls through to the CDN copy (see handle()).
+// Assets are read from public/ when the files are present (local runs), otherwise from the embedded copy in
+// src/lib/assets.generated.js, so they are always served whatever Vercel bundles with the function.
 function loadStatic() {
+  const embedded = require('./lib/assets.generated');
   const files = new Map();
-  const add = (name, read) => {
+  for (const name of Object.keys(embedded)) {
+    let data;
     try {
-      files.set(`/public/${name}`, { data: read(), type: STATIC_TYPES[path.extname(name)] });
+      data = fs.readFileSync(path.join(__dirname, '..', 'public', name));
     } catch {
-      // not bundled: served from the CDN path instead
+      data = Buffer.from(embedded[name]);
     }
-  };
-  add('style.css', () => fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css')));
-  add('app.js', () => fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js')));
+    files.set(`/public/${name}`, { data, type: STATIC_TYPES[path.extname(name)] });
+  }
   return files;
 }
 
@@ -101,10 +102,6 @@ function createApp(options = {}) {
       const file = staticFiles.get(ctx.path);
       if (file && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
         return ctx.send(200, file.data, { 'Content-Type': file.type, 'Cache-Control': 'public, max-age=300' });
-      }
-      if (!file && (ctx.path === '/public/style.css' || ctx.path === '/public/app.js') && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
-        res.writeHead(302, { ...securityHeaders(config.production), Location: ctx.path.slice('/public'.length), 'Cache-Control': 'no-store' });
-        return res.end();
       }
       await ensureReady();
       await loadSession(ctx);

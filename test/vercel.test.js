@@ -151,7 +151,7 @@ describe('AC-41: Vercel entry', () => {
 describe('repo hygiene', () => {
   test('no removed files; scripts/ holds only fake-turso.js; no file in src/ uses removed env vars', () => {
     for (const f of ['Dockerfile', '.dockerignore', 'deploy', 'scripts/backup.js', 'scripts/seed.js']) assert.ok(!fs.existsSync(path.join(ROOT, f)), f);
-    assert.deepEqual(fs.readdirSync(path.join(ROOT, 'scripts')), ['fake-turso.js']);
+    assert.deepEqual(fs.readdirSync(path.join(ROOT, 'scripts')).sort(), ['embed-assets.js', 'fake-turso.js']);
     const files = [];
     (function walk(d) {
       for (const e of fs.readdirSync(d, { withFileTypes: true })) (e.isDirectory() ? walk(path.join(d, e.name)) : files.push(path.join(d, e.name)));
@@ -380,4 +380,14 @@ test('entry points: src/app.js and api/index.js both export a (req, res) handler
   assert.strictEqual(appModule.default, appModule);
   assert.strictEqual(typeof appModule.createApp, 'function');
   assert.strictEqual(require('../api/index.js'), appModule);
+});
+
+test('embedded assets match public/ (run node scripts/embed-assets.js after editing them)', () => {
+  const assert = require('node:assert');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const embedded = require('../src/lib/assets.generated');
+  for (const name of ['style.css', 'app.js']) {
+    assert.strictEqual(embedded[name], fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'));
+  }
 });
