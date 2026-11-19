@@ -110,10 +110,10 @@ describe(`[${driver}] QA fixes`, () => {
   });
 
   test('#7 tables are wrapped for horizontal scrolling', async () => {
-    const page = await admin.get(`/app/roles/${role}`);
-    assert.match(page.text, /<div class="table-wrap"><table class="data pipeline">\s*<colgroup>/);
+    const page = await admin.get('/app/admin/roles');
+    assert.match(page.text, /<div class="table-wrap"><table class="data">/);
     const css = await t.client().get('/public/style.css');
-    assert.match(css.text, /\.table-wrap \{ overflow-x: auto;/);
+    assert.match(css.text, /\.table-wrap \{ position: relative; overflow-x: auto;/);
     assert.match(css.text, /overflow-wrap: anywhere/);
   });
 

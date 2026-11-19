@@ -44,33 +44,69 @@ async function dashboard(ctx) {
       since.set(row.role_id, row.n);
     }
   }
+  // Summary strip: totals over the roles on this page (so "My roles" shows my own numbers).
+  const total = (stage) => roles.reduce((n, r) => n + ((counts.get(r.id) || {})[stage] || 0), 0);
+  const monthStart = zonedMidnightUtc(`${todayIn(ctx.app.config.timezone).slice(0, 7)}-01`, ctx.app.config.timezone).toISOString();
+  const onboardedByRole = new Map();
+  for (const row of await db.all("SELECT role_id, COUNT(*) AS n FROM applications WHERE stage = 'onboarded' AND onboarded_at >= ? GROUP BY role_id", [monthStart])) {
+    onboardedByRole.set(row.role_id, row.n);
+  }
+  const onboardedThisMonth = roles.reduce((n, r) => n + (onboardedByRole.get(r.id) || 0), 0);
+  const openRoles = roles.filter((r) => r.status === 'open').length;
+  const summary = [
+    ['Open roles', openRoles, false],
+    ['New applications', total('new'), total('new') > 0],
+    ['In Trial', total('trial'), false],
+    ['Onboarded this month', onboardedThisMonth, false],
+  ];
   page(ctx, {
     title: 'Dashboard',
-    body: html`<h1>${showAll ? 'All roles' : 'My roles'}</h1>
-      <p class="toolbar">
-        ${showAll ? html`<a href="/app">Show my roles</a>` : html`<a href="/app?view=all">Show all roles</a>`}
-        · <a href="/app/export">Export CSV</a>
-        <form method="post" action="/app/seen" class="inline">${csrfField(ctx)}${showAll ? html`<input type="hidden" name="view" value="all">` : ''}<button type="submit">Mark as seen</button></form>
-      </p>
+    body: html`<div class="page-header">
+        <div><h1>Dashboard</h1></div>
+        <div class="page-actions">
+          <form method="post" action="/app/seen" class="inline">${csrfField(ctx)}${showAll ? html`<input type="hidden" name="view" value="all">` : ''}<button type="submit" class="btn btn-secondary">Mark as seen</button></form>
+        </div>
+      </div>
+      <div class="summary-strip">
+        ${summary.map(([label, n, hot]) => html`<div class="summary-item${hot ? ' is-hot' : ''}"><span class="summary-n">${n}</span><span class="summary-l">${label}</span></div>`)}
+      </div>
+      <nav aria-label="Which roles"><ul class="filter">
+        <li><a class="chip" href="/app"${showAll ? '' : html` aria-current="true"`}>My roles</a></li>
+        <li><a class="chip" href="/app?view=all"${showAll ? html` aria-current="true"` : ''}>All roles</a></li>
+      </ul></nav>
       ${roles.length === 0
-        ? html`<p class="muted">${showAll ? 'No roles yet.' : 'No roles are assigned to you.'} ${showAll ? '' : html`<a href="/app?view=all">See all roles</a>.`}</p>`
-        : html`<div class="table-wrap"><table class="data" id="roles-table">
-          <thead><tr><th>Role</th><th>Site</th><th>Status</th><th>Rep</th>${STAGES.map((s) => html`<th class="num">${STAGE_LABELS[s]}</th>`)}</tr></thead>
-          <tbody>
+        ? html`<div class="empty">
+            <h2>${showAll ? 'No roles yet' : 'No roles are assigned to you'}</h2>
+            <p>${showAll ? 'Roles appear here once an admin creates them.' : 'Roles you are the rep for will show up here.'}</p>
+            ${showAll ? '' : html`<p><a class="btn btn-secondary" href="/app?view=all">See all roles</a></p>`}
+          </div>`
+        : html`<ul class="role-list role-list-app" id="roles-list">
             ${roles.map((r) => {
               const c = counts.get(r.id) || {};
-              return html`<tr data-role-id="${r.id}">
-                <td><a href="/app/roles/${r.id}">${r.title}</a></td>
-                <td>${r.site_name}</td>
-                <td><span class="status status-${r.status}">${r.status}</span></td>
-                <td>${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</td>
-                ${STAGES.map(
-                  (s) => html`<td class="num${s === 'new' && c.new ? ' highlight' : ''}" data-stage="${s}">${c[s] || 0}${s === 'new' && since.get(r.id) ? html` <span class="since" data-since="${since.get(r.id)}">+${since.get(r.id)} since your last visit</span>` : ''}</td>`
-                )}
-              </tr>`;
+              const fresh = since.get(r.id) || 0;
+              return html`<li class="role-row role-row-app${r.status === 'closed' ? ' is-closed' : ''}" data-role-id="${r.id}">
+                <div class="role-row-main">
+                  <a class="role-title" href="/app/roles/${r.id}">${r.title}</a>
+                  <span class="role-site">${r.site_name || r.vertical}</span>
+                  <div class="role-row-meta">
+                    <span class="status status-${r.status}">${r.status === 'open' ? 'Open' : 'Closed'}</span>
+                    <span>Rep: ${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</span>
+                  </div>
+                </div>
+                <div class="role-row-counter">
+                  <ol class="stage-counter" aria-label="Candidates by stage">
+                    ${STAGES.map((s) => {
+                      const n = c[s] || 0;
+                      const cls = `stage-seg stage-${s}${s === 'new' && n > 0 ? ' is-hot' : ''}${n === 0 ? ' is-zero' : ''}`;
+                      return html`<li class="${cls}" data-stage="${s}"><span class="stage-seg-n">${n}</span><span class="stage-seg-l">${STAGE_LABELS[s]}</span></li>`;
+                    })}
+                  </ol>
+                  ${fresh ? html`<span class="since" data-since="${fresh}">+${fresh} since your last visit</span>` : ''}
+                </div>
+                <div class="role-row-action"><a class="btn btn-secondary" href="/app/roles/${r.id}" aria-label="Open pipeline for ${r.title}">Open pipeline</a></div>
+              </li>`;
             })}
-          </tbody>
-        </table></div>`}`,
+          </ul>`}`,
   });
 }
 
@@ -93,16 +129,26 @@ async function rolePipeline(ctx) {
     [roleId]
   );
   const returnTo = `/app/roles/${roleId}`;
+  const isAdmin = ctx.user.role === 'admin';
   page(ctx, {
     title: role.title,
-    body: html`<p><a href="/app">← Dashboard</a></p>
-      <h1>${role.title}</h1>
-      <p class="muted">${role.vertical}${role.site_name ? ` · ${role.site_name}` : ''}</p>
-      <div class="role-header">
-        <p>Status: <span class="status status-${role.status}">${role.status}</span>
-           · Assigned rep: <strong>${role.rep_name || role.rep_email || 'Unassigned'}</strong>
-           ${role.status === 'open' ? html` · <a href="/roles/${role.id}">Public page</a>` : ''}
-           ${ctx.user.role === 'admin' ? html` · <a href="/app/admin/roles/${role.id}">Edit role</a>` : ''}</p>
+    body: html`<a class="back" href="/app">Dashboard</a>
+      <div class="page-header">
+        <div>
+          <h1>${role.title}</h1>
+          <dl class="meta-list">
+            ${role.site_name ? html`<div><dt>Site</dt><dd>${role.site_name}</dd></div>` : ''}
+            <div><dt>Vertical</dt><dd>${role.vertical}</dd></div>
+            <div><dt>Status</dt><dd><span class="status status-${role.status}">${role.status === 'open' ? 'Open' : 'Closed'}</span></dd></div>
+            <div><dt>Assigned rep</dt><dd>${role.rep_name || role.rep_email || 'Unassigned'}</dd></div>
+          </dl>
+        </div>
+        <div class="page-actions">
+          ${role.status === 'open' ? html`<a class="btn btn-secondary" href="/roles/${role.id}">View public page</a>` : ''}
+          ${isAdmin ? html`<a class="btn btn-secondary" href="/app/admin/roles/${role.id}">Edit role</a>` : ''}
+        </div>
+      </div>
+      <div class="role-bar">
         <form method="post" action="/app/roles/${role.id}/assign" class="inline">
           ${csrfField(ctx)}
           <label>Reassign rep
@@ -111,40 +157,44 @@ async function rolePipeline(ctx) {
               ${users.map((u) => html`<option value="${u.id}"${u.id === role.assigned_user_id ? raw(' selected') : ''}>${u.name || u.email}</option>`)}
             </select>
           </label>
-          <button type="submit">Save</button>
+          <button type="submit" class="btn btn-secondary">Reassign</button>
         </form>
+        <span class="meta">${apps.length} ${apps.length === 1 ? 'candidate' : 'candidates'} in this pipeline</span>
       </div>
+      <div class="board">
       ${STAGES.map((stage) => {
         const list = apps.filter((a) => a.stage === stage);
-        return html`<section class="stage-section" id="stage-${stage}" data-stage="${stage}">
-          <h2>${STAGE_LABELS[stage]} <span class="count">${list.length}</span></h2>
+        return html`<section class="board-col stage-${stage}" id="stage-${stage}" data-stage="${stage}" aria-labelledby="h-${stage}">
+          <div class="board-col-head">
+            <h2 id="h-${stage}">${STAGE_LABELS[stage]}</h2>
+            <span class="board-count${list.length === 0 ? ' is-zero' : ''}">${list.length}</span>
+          </div>
           ${list.length === 0
-            ? html`<p class="muted">No candidates.</p>`
-            : html`<div class="table-wrap"><table class="data pipeline">
-              <colgroup><col class="c-name"><col class="c-email"><col class="c-date"><col class="c-source"><col class="c-days"><col class="c-move"></colgroup>
-              <thead><tr><th>Name</th><th>Email</th><th>Applied</th><th>Source</th><th class="num">Days in stage</th><th>Move to</th></tr></thead>
-              <tbody>
+            ? html`<p class="board-empty">No candidates in ${STAGE_LABELS[stage]}.</p>`
+            : html`<ul class="board-list">
                 ${list.map(
-                  (a) => html`<tr class="clickable" data-href="/app/applications/${a.id}">
-                    <td><a href="/app/applications/${a.id}">${a.name}</a></td>
-                    <td>${a.email}</td>
-                    <td>${fmtDate(ctx, a.applied_at)}</td>
-                    <td>${a.source_tag}</td>
-                    <td class="num">${daysSince(a.stage_changed_at)}</td>
-                    <td>
-                      <form method="post" action="/app/applications/${a.id}/stage" class="inline">
-                        ${csrfField(ctx)}
-                        <input type="hidden" name="return_to" value="${returnTo}">
-                        ${stageSelect(a.stage)}
-                        <button type="submit">Move</button>
-                      </form>
-                    </td>
-                  </tr>`
+                  (a) => html`<li class="cand-card" data-application-id="${a.id}">
+                    <a class="cand-name" href="/app/applications/${a.id}">${a.name}</a>
+                    <span class="cand-email">${a.email}</span>
+                    <dl class="cand-meta">
+                      <div><dt>Source</dt><dd class="cand-source">${a.source_tag || 'None'}</dd></div>
+                      <div><dt>In stage</dt><dd>${daysSince(a.stage_changed_at)} ${daysSince(a.stage_changed_at) === 1 ? 'day' : 'days'}</dd></div>
+                      <div><dt>Applied</dt><dd>${fmtDate(ctx, a.applied_at)}</dd></div>
+                    </dl>
+                    <form method="post" action="/app/applications/${a.id}/stage" class="cand-move">
+                      ${csrfField(ctx)}
+                      <input type="hidden" name="return_to" value="${returnTo}">
+                      <select name="stage" aria-label="Move ${a.name} to stage">
+                        ${STAGES.map((s) => html`<option value="${s}"${s === a.stage ? raw(' selected') : ''}>${STAGE_LABELS[s]}</option>`)}
+                      </select>
+                      <button type="submit" aria-label="Move ${a.name} to the selected stage">Move</button>
+                    </form>
+                  </li>`
                 )}
-              </tbody>
-            </table></div>`}
+              </ul>`}
         </section>`;
-      })}`,
+      })}
+      </div>`,
   });
 }
 
@@ -167,12 +217,16 @@ async function reassign(ctx) {
 function exportPage(ctx) {
   page(ctx, {
     title: 'Export',
-    body: html`<h1>Export applications</h1>
-      <p>Downloads one row per application as CSV (UTF-8). Dates are in ${ctx.app.config.timezone}. Leave the dates empty to export everything.</p>
-      <form method="get" action="/app/export.csv" class="stacked narrow">
-        <label>Applied from <input type="date" name="from"></label>
-        <label>Applied to <input type="date" name="to"></label>
-        <p><button type="submit" class="primary">Download CSV</button></p>
+    body: html`<div class="page-header"><div><h1>Export applications</h1>
+        <p class="lede">Download every application as a spreadsheet-ready CSV file.</p></div></div>
+      <form method="get" action="/app/export.csv" class="card centred-card">
+        <h2>Choose a date range</h2>
+        <p class="fine-print">One row per application, in UTF-8. Dates are in ${ctx.app.config.timezone}. Leave both dates empty to export everything.</p>
+        <div class="field-row">
+          <div class="field"><label for="f-from">Applied from</label><input type="date" name="from" id="f-from"></div>
+          <div class="field"><label for="f-to">Applied to</label><input type="date" name="to" id="f-to"></div>
+        </div>
+        <div class="form-actions"><button type="submit" class="btn btn-primary">Download CSV</button></div>
       </form>`,
   });
 }

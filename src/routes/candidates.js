@@ -94,65 +94,44 @@ async function candidatePage(ctx) {
   const linkDiff = Boolean(app.applicant_linkedin) && app.applicant_linkedin !== person.linkedin_url;
   const today = todayIn(config.timezone);
 
+  const stageIndex = STAGES.indexOf(app.stage);
+  const sampleLinks = String(app.sample_links || '').split('\n').filter(Boolean);
+
   page(ctx, {
     title: person.name,
-    body: html`<p><a href="/app/roles/${app.role_id}">← ${app.role_title}</a></p>
+    body: html`<a class="back" href="/app/roles/${app.role_id}">${app.role_title} pipeline</a>
       <header class="candidate-header">
-        <h1>${person.name}</h1>
-        <p><a href="mailto:${encodeURIComponent(person.email)}">${person.email}</a>${linkedin ? html` · ${link(linkedin, 'LinkedIn / portfolio')}` : ''}</p>
-        ${nameDiff || linkDiff
-          ? html`<p class="muted" id="submitted-as">Entered on this application:${nameDiff ? html` name <strong>${app.applicant_name}</strong>` : ''}${linkDiff ? html` link ${link(app.applicant_linkedin)}` : ''}</p>`
-          : ''}
-        <p>Role: <strong>${app.role_title}</strong>${app.role_status === 'closed' ? ' (closed)' : ''}
-           · Stage: <strong class="stage-badge stage-${app.stage}">${STAGE_LABELS[app.stage]}</strong>
-           · Applied ${fmtDateTime(ctx, app.applied_at)}</p>
+        <div class="page-header">
+          <div>
+            <h1>${person.name}</h1>
+            <dl class="meta-list">
+              <div><dt>Email</dt><dd><a href="mailto:${encodeURIComponent(person.email)}">${person.email}</a></dd></div>
+              ${linkedin ? html`<div><dt>Profile</dt><dd>${link(linkedin, 'LinkedIn or portfolio')}</dd></div>` : ''}
+              <div><dt>Role</dt><dd>${app.role_title}${app.role_status === 'closed' ? ' (closed)' : ''}</dd></div>
+              <div><dt>Applied</dt><dd>${fmtDateTime(ctx, app.applied_at)}</dd></div>
+            </dl>
+          </div>
+          <div class="page-actions"><span class="stage-badge stage-${app.stage}">${STAGE_LABELS[app.stage]}</span></div>
+        </div>
+        <div class="stepper-card">
+          <ol class="stepper" aria-label="Stage">
+            ${STAGES.map((st, i) => html`<li class="stepper-step stage-${st}${i < stageIndex ? ' is-done' : ''}${i === stageIndex ? ' is-current' : ''}"${i === stageIndex ? html` aria-current="step"` : ''}><span class="stepper-dot" aria-hidden="true"></span><span class="stepper-label">${STAGE_LABELS[st]}</span></li>`)}
+          </ol>
+        </div>
       </header>
 
-      <div class="grid">
+      <div class="grid-2 wide-left">
       <div class="col">
-        <section class="card">
-          <h2>Change stage</h2>
-          <form method="post" action="/app/applications/${app.id}/stage" class="stacked" id="stage-form">
-            ${csrfField(ctx)}
-            <label>New stage ${stageSelect(app.stage)}</label>
-            <div class="voltax-fields" data-show-for="onboarded" data-current="${app.stage}">
-              <p class="muted">When moving to Onboarded, record the Voltax account (Voltax API is not connected yet, so enter it by hand).</p>
-              <label>Voltax user ID <input type="text" name="voltax_user_id" maxlength="100"></label>
-              <label>Onboarded date <input type="date" name="voltax_onboarded_on" value="${today}"></label>
-            </div>
-            <p><button type="submit">Save stage</button></p>
-          </form>
-          ${app.stage === 'onboarded'
-            ? html`<h3 id="voltax">Voltax</h3>
-              <p>User ID: ${app.voltax_user_id || html`<span class="muted">not recorded</span>`}
-                 · Onboarded on: ${app.voltax_onboarded_on || html`<span class="muted">not recorded</span>`}</p>
-              <form method="post" action="/app/applications/${app.id}/voltax" class="inline">
-                ${csrfField(ctx)}
-                <label>Voltax user ID <input type="text" name="voltax_user_id" maxlength="100" value="${app.voltax_user_id || ''}" required></label>
-                <label>Date <input type="date" name="voltax_onboarded_on" value="${app.voltax_onboarded_on || today}"></label>
-                <button type="submit">Record</button>
-              </form>`
-            : ''}
-        </section>
-
-        <section class="card">
-          <h2>Move to another role</h2>
-          <form method="post" action="/app/applications/${app.id}/role" class="inline">
-            ${csrfField(ctx)}
-            <select name="role_id" aria-label="Role">
-              ${roles.map(
-                (r) => html`<option value="${r.id}"${r.id === app.role_id ? raw(' selected') : ''}>${r.title}${r.site_name ? ` (${r.site_name})` : ''}${r.status === 'closed' ? ' [closed]' : ''}</option>`
-              )}
-            </select>
-            <button type="submit">Move</button>
-          </form>
-        </section>
-
+        ${nameDiff || linkDiff
+          ? html`<div class="submitted-as" id="submitted-as">
+              <p>Entered on this application:${nameDiff ? html` name <strong>${app.applicant_name}</strong>` : ''}${linkDiff ? html` link ${link(app.applicant_linkedin)}` : ''}</p>
+            </div>`
+          : ''}
         <section class="card">
           <h2>Application</h2>
-          <dl class="details">
+          <dl class="details answers">
             <dt>Writing samples</dt>
-            <dd><ul class="plain">${String(app.sample_links || '').split('\n').filter(Boolean).map((l) => html`<li>${link(l)}</li>`)}</ul></dd>
+            <dd>${sampleLinks.length ? html`<ul class="link-list">${sampleLinks.map((l) => html`<li>${link(l)}</li>`)}</ul>` : html`<span class="muted">None</span>`}</dd>
             <dt>Resume</dt>
             <dd>${app.resume_url ? link(app.resume_url) : html`<span class="muted">None</span>`}</dd>
             ${answers.map((a) => html`<dt>${a.question}</dt><dd>${a.answer ? multiline(a.answer) : html`<span class="muted">No answer</span>`}</dd>`)}
@@ -162,29 +141,80 @@ async function candidatePage(ctx) {
         </section>
 
         <section class="card" id="history">
-          <h2>History</h2>
+          <h2>Other applications</h2>
           ${history.length === 0
-            ? html`<p class="muted">No other applications.</p>`
+            ? html`<p class="muted">${person.name} has not applied for any other role.</p>`
             : html`<div class="table-wrap"><table class="data"><thead><tr><th>Role</th><th>Applied</th><th>Stage</th></tr></thead><tbody>
               ${history.map(
-                (h) => html`<tr><td><a href="/app/applications/${h.id}">${h.role_title}</a></td><td>${fmtDate(ctx, h.applied_at)}</td><td>${STAGE_LABELS[h.stage]}</td></tr>`
+                (h) => html`<tr><td><a href="/app/applications/${h.id}">${h.role_title}</a></td><td>${fmtDate(ctx, h.applied_at)}</td><td><span class="stage-badge stage-${h.stage}">${STAGE_LABELS[h.stage]}</span></td></tr>`
               )}</tbody></table></div>`}
         </section>
       </div>
 
       <div class="col">
+        <section class="card">
+          <h2>Change stage</h2>
+          <form method="post" action="/app/applications/${app.id}/stage" id="stage-form">
+            ${csrfField(ctx)}
+            <div class="field">
+              <label for="f-stage">New stage</label>
+              <select name="stage" id="f-stage">${STAGES.map((st) => html`<option value="${st}"${st === app.stage ? raw(' selected') : ''}>${STAGE_LABELS[st]}</option>`)}</select>
+            </div>
+            <div class="voltax-fields" data-show-for="onboarded" data-current="${app.stage}">
+              <p class="help muted">When moving to Onboarded, record the Voltax account. The Voltax API is not connected yet, so enter it by hand.</p>
+              <div class="field"><label for="f-voltax">Voltax user ID</label><input type="text" id="f-voltax" name="voltax_user_id" maxlength="100"></div>
+              <div class="field"><label for="f-voltax-on">Onboarded date</label><input type="date" id="f-voltax-on" name="voltax_onboarded_on" value="${today}"></div>
+            </div>
+            <div class="form-actions"><button type="submit" class="btn btn-primary">Save stage</button></div>
+          </form>
+          ${app.stage === 'onboarded'
+            ? html`<h3 id="voltax">Voltax</h3>
+              <dl class="meta-list">
+                <div><dt>User ID</dt><dd>${app.voltax_user_id || html`<span class="muted">Not recorded</span>`}</dd></div>
+                <div><dt>Onboarded on</dt><dd>${app.voltax_onboarded_on || html`<span class="muted">Not recorded</span>`}</dd></div>
+              </dl>
+              <form method="post" action="/app/applications/${app.id}/voltax">
+                ${csrfField(ctx)}
+                <div class="field-row">
+                  <div class="field"><label for="f-voltax-id2">Voltax user ID</label><input type="text" id="f-voltax-id2" name="voltax_user_id" maxlength="100" value="${app.voltax_user_id || ''}" required></div>
+                  <div class="field"><label for="f-voltax-on2">Date</label><input type="date" id="f-voltax-on2" name="voltax_onboarded_on" value="${app.voltax_onboarded_on || today}"></div>
+                </div>
+                <div class="form-actions"><button type="submit" class="btn btn-secondary">Record Voltax details</button></div>
+              </form>`
+            : ''}
+        </section>
+
+        <section class="card">
+          <h2>Move to another role</h2>
+          <form method="post" action="/app/applications/${app.id}/role">
+            ${csrfField(ctx)}
+            <div class="field">
+              <label for="f-role">Role</label>
+              <select name="role_id" id="f-role">
+                ${roles.map(
+                  (r) => html`<option value="${r.id}"${r.id === app.role_id ? raw(' selected') : ''}>${r.title}${r.site_name ? ` (${r.site_name})` : ''}${r.status === 'closed' ? ' [closed]' : ''}</option>`
+                )}
+              </select>
+            </div>
+            <div class="form-actions"><button type="submit" class="btn btn-secondary">Move to this role</button></div>
+          </form>
+        </section>
+
         <section class="card" id="notes">
           <h2>Notes</h2>
-          <form method="post" action="/app/applications/${app.id}/notes" class="stacked">
+          <form method="post" action="/app/applications/${app.id}/notes" class="notes-form">
             ${csrfField(ctx)}
-            <label>Add a note <textarea name="body" rows="3" maxlength="${LIMITS.note}" required></textarea></label>
-            <p><button type="submit">Add note</button></p>
+            <div class="field">
+              <label for="f-note">Add a note</label>
+              <textarea name="body" id="f-note" rows="3" maxlength="${LIMITS.note}" required></textarea>
+            </div>
+            <div class="form-actions"><button type="submit" class="btn btn-secondary">Add note</button></div>
           </form>
           ${notes.length === 0
-            ? html`<p class="muted">No notes yet.</p>`
+            ? html`<p class="muted">No notes yet. Notes are visible to everyone on the team.</p>`
             : html`<ul class="notes">${notes.map(
                 (n) => html`<li class="note">
-                  <div class="meta">${n.author_name || n.author_email || 'Unknown'} · ${fmtDateTime(ctx, n.created_at)}${n.role_title ? html` · <span class="tag">${n.role_title}</span>` : ''}</div>
+                  <div class="meta">${n.author_name || n.author_email || 'Unknown'}, ${fmtDateTime(ctx, n.created_at)}${n.role_title ? html` <span class="tag">${n.role_title}</span>` : ''}</div>
                   ${multiline(n.body)}
                 </li>`
               )}</ul>`}
@@ -192,40 +222,43 @@ async function candidatePage(ctx) {
 
         <section class="card" id="email">
           <h2>Email</h2>
-          <form method="get" action="/app/applications/${app.id}#email" class="inline">
-            <select name="template" aria-label="Template">
+          <form method="get" action="/app/applications/${app.id}#email" class="inline template-load">
+            <label class="visually-hidden" for="f-template">Template</label>
+            <select name="template" id="f-template">
               <option value="">Choose a template</option>
               ${templates.map((t) => html`<option value="${t.id}"${String(t.id) === String(draft.templateId) ? raw(' selected') : ''}>${t.name}</option>`)}
             </select>
-            <button type="submit">Load</button>
+            <button type="submit" class="btn btn-secondary">Load template</button>
           </form>
           ${draft.unknown.length
             ? html`<p class="flash flash-error" id="merge-warning">Unknown merge field${draft.unknown.length > 1 ? 's' : ''}: ${draft.unknown.map((u) => `{{${u}}}`).join(', ')}. Fix ${draft.unknown.length > 1 ? 'them' : 'it'} before sending.</p>`
             : ''}
-          <form method="post" action="/app/applications/${app.id}/email" class="stacked" target="_blank">
+          <form method="post" action="/app/applications/${app.id}/email" target="_blank">
             ${csrfField(ctx)}
             <input type="hidden" name="template_id" value="${draft.templateId}">
-            <p class="muted">To: ${person.email}. The email is written and sent from your own mail account; this logs that you opened it.</p>
-            <label>Subject <input type="text" name="subject" maxlength="${LIMITS.subject}" value="${draft.subject}" required></label>
-            <label>Body <textarea name="body" rows="10" maxlength="${LIMITS.body}" required>${draft.body}</textarea></label>
-            <p><button type="submit" name="via" value="gmail" class="primary">Open in Gmail</button>
-               <button type="submit" name="via" value="mailto">Open in mail app</button></p>
+            <p class="composer-to">To: ${person.email}. The email is written and sent from your own mail account. Recruit only logs that you opened it.</p>
+            <div class="field"><label for="f-subject">Subject</label><input type="text" id="f-subject" name="subject" maxlength="${LIMITS.subject}" value="${draft.subject}" required></div>
+            <div class="field"><label for="f-body">Message</label><textarea name="body" id="f-body" rows="10" maxlength="${LIMITS.body}" required>${draft.body}</textarea></div>
+            <div class="form-actions">
+              <button type="submit" name="via" value="gmail" class="btn btn-primary">Open in Gmail</button>
+              <button type="submit" name="via" value="mailto" class="btn btn-secondary">Open in mail app</button>
+            </div>
           </form>
         </section>
 
         <section class="card" id="activity">
           <h2>Activity</h2>
           <h3>Stage and role changes</h3>
-          <ol class="events">${events.map(
-            (e) => html`<li data-type="${e.type}">${describeEvent(e)} <span class="meta">· ${e.actor_user_id ? e.actor_name || e.actor_email : 'System'} · ${fmtDateTime(ctx, e.at)}</span></li>`
+          <ol class="events event-list">${events.map(
+            (e) => html`<li data-type="${e.type}">${describeEvent(e)} <span class="meta">${e.actor_user_id ? e.actor_name || e.actor_email : 'System'}, ${fmtDateTime(ctx, e.at)}</span></li>`
           )}</ol>
           <h3>Emails</h3>
           ${emails.length === 0
-            ? html`<p class="muted">No emails logged.</p>`
-            : html`<ul class="emails">${emails.map(
+            ? html`<p class="muted">No emails logged yet.</p>`
+            : html`<ul class="emails email-log">${emails.map(
                 (m) => html`<li class="email-${m.via}">
                   <details>
-                    <summary><strong>${m.subject}</strong> · ${VIA_LABELS[m.via] || m.via} · ${m.sender_name || m.sender_email} · ${fmtDateTime(ctx, m.sent_at)}${m.role_title ? html` · <span class="tag">${m.role_title}</span>` : ''}</summary>
+                    <summary><strong>${m.subject}</strong><span class="meta">${VIA_LABELS[m.via] || m.via}, ${m.sender_name || m.sender_email}, ${fmtDateTime(ctx, m.sent_at)}${m.role_title ? html` <span class="tag">${m.role_title}</span>` : ''}</span></summary>
                     ${multiline(m.body)}
                   </details>
                 </li>`
@@ -233,10 +266,10 @@ async function candidatePage(ctx) {
         </section>
 
         ${isAdmin
-          ? html`<section class="card danger">
+          ? html`<section class="card card-danger danger">
               <h2>Delete candidate</h2>
-              <p>Permanently deletes this person and all their applications, notes, email records and activity (for data requests).</p>
-              <p><a href="/app/people/${person.id}/delete?from=${app.id}" class="button danger">Delete candidate…</a></p>
+              <p>Permanently deletes this person and all their applications, notes, email records and activity. Use this for data requests.</p>
+              <a href="/app/people/${person.id}/delete?from=${app.id}" class="btn btn-danger">Delete candidate</a>
             </section>`
           : ''}
       </div>
@@ -410,10 +443,13 @@ async function logEmail(ctx) {
   const where = via === 'gmail' ? 'Gmail' : 'your mail app';
   page(ctx, {
     title: 'Email logged',
-    body: html`<div class="narrow">
+    body: html`<div class="card centred-card">
       <h1>Email logged. Opening ${where}…</h1>
-      <p>If nothing opens, <a href="${href}" data-auto-open id="compose-link">open the compose window</a>.</p>
-      <p><a href="/app/applications/${app.id}#activity">Back to the candidate</a></p>
+      <p>If nothing opens, use the button below. Recruit has recorded that you opened this email for ${person.name}.</p>
+      <div class="form-actions">
+        <a href="${href}" data-auto-open id="compose-link" class="btn btn-primary">Open the compose window</a>
+        <a class="btn btn-secondary" href="/app/applications/${app.id}#activity">Back to ${person.name}</a>
+      </div>
     </div>`,
   });
 }
@@ -427,14 +463,17 @@ async function deleteConfirm(ctx) {
   const from = /^[1-9]\d*$/.test(ctx.query.get('from') || '') ? ctx.query.get('from') : null;
   page(ctx, {
     title: 'Delete candidate',
-    body: html`<h1>Delete ${person.name}?</h1>
-      <p>This permanently deletes <strong>${person.name}</strong> (${person.email}), their ${apps.length} application${apps.length === 1 ? '' : 's'}
-        (${apps.map((a) => a.title).join(', ')}), all notes, email records and activity. This cannot be undone.</p>
-      <form method="post" action="/app/people/${person.id}/delete" class="inline">
+    body: html`<div class="card card-danger centred-card">
+      <h1>Delete ${person.name}?</h1>
+      <p>This permanently deletes <strong>${person.name}</strong> (${person.email}), ${apps.length === 1 ? 'their application' : `their ${apps.length} applications`}
+        (${apps.map((a) => a.title).join(', ')}), and all notes, email records and activity.</p>
+      <p><strong>This cannot be undone.</strong></p>
+      <form method="post" action="/app/people/${person.id}/delete" class="form-actions">
         ${csrfField(ctx)}
-        <button type="submit" class="danger" data-confirm="Delete this candidate permanently?">Yes, delete permanently</button>
-        <a href="${from ? `/app/applications/${from}` : '/app'}">Cancel</a>
-      </form>`,
+        <button type="submit" class="btn btn-danger" data-confirm="Delete this candidate permanently?">Yes, delete permanently</button>
+        <a class="btn btn-secondary" href="${from ? `/app/applications/${from}` : '/app'}">Cancel</a>
+      </form>
+    </div>`,
   });
 }
 
@@ -462,7 +501,69 @@ async function deletePerson(ctx) {
   ctx.redirect('/app');
 }
 
+const PAGE_SIZE = 50;
+
+// Escape LIKE wildcards so % and _ in the query match themselves ("\" is the ESCAPE character).
+function likePattern(q) {
+  return `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+async function searchPage(ctx) {
+  const { db } = ctx.app;
+  const q = (ctx.query.get('q') || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  const pageNo = /^[1-9]\d{0,3}$/.test(ctx.query.get('page') || '') ? Number(ctx.query.get('page')) : 1;
+  const base = `SELECT a.id, a.stage, a.applied_at, p.name, p.email, r.title AS role_title, r.site_name
+       FROM applications a JOIN people p ON p.id = a.person_id JOIN job_roles r ON r.id = a.role_id`;
+  const order = 'ORDER BY a.applied_at DESC, a.id DESC LIMIT ? OFFSET ?';
+  const paging = [PAGE_SIZE + 1, (pageNo - 1) * PAGE_SIZE];
+  const rows = q
+    ? await db.all(`${base} WHERE p.name LIKE ? ESCAPE '\\' OR p.email LIKE ? ESCAPE '\\' ${order}`, [likePattern(q), likePattern(q), ...paging])
+    : await db.all(`${base} ${order}`, paging);
+  const hasNext = rows.length > PAGE_SIZE;
+  const shown = rows.slice(0, PAGE_SIZE);
+  const href = (n) => `/app/candidates?${new URLSearchParams({ ...(q ? { q } : {}), ...(n > 1 ? { page: String(n) } : {}) }).toString()}`.replace(/\?$/, '');
+  page(ctx, {
+    title: 'Candidates',
+    body: html`<div class="page-header"><div><h1>Candidates</h1>
+        <p class="lede">Find anyone who has applied, by name or email.</p></div></div>
+      <form method="get" action="/app/candidates" class="search-bar" role="search">
+        <label class="visually-hidden" for="f-q">Search by name or email</label>
+        <input type="search" id="f-q" name="q" value="${q}" maxlength="100" placeholder="Name or email" autocomplete="off">
+        <button type="submit" class="btn btn-primary">Search</button>
+        ${q ? html`<a class="btn btn-secondary" href="/app/candidates">Clear</a>` : ''}
+      </form>
+      ${shown.length === 0
+        ? html`<div class="empty">
+            <h2>${q ? html`No candidates match "${q}"` : 'No applications yet'}</h2>
+            <p>${q ? 'Check the spelling, or try part of the name or the email address.' : 'Applications appear here as soon as someone applies for an open role.'}</p>
+            ${q ? html`<p><a class="btn btn-secondary" href="/app/candidates">Show recent applications</a></p>` : ''}
+          </div>`
+        : html`<p class="result-count" id="result-count">${q ? `Results for "${q}"` : 'Most recent applications'}${pageNo > 1 ? `, page ${pageNo}` : ''}</p>
+          <div class="table-wrap"><table class="data" id="candidates-table">
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Stage</th><th>Applied</th></tr></thead>
+            <tbody>
+              ${shown.map(
+                (a) => html`<tr>
+                  <td class="nowrap"><a href="/app/applications/${a.id}"><strong>${a.name}</strong></a></td>
+                  <td class="nowrap">${a.email}</td>
+                  <td>${a.role_title}${a.site_name ? html`<span class="cell-sub">${a.site_name}</span>` : ''}</td>
+                  <td><span class="stage-badge stage-${a.stage}">${STAGE_LABELS[a.stage]}</span></td>
+                  <td>${fmtDate(ctx, a.applied_at)}</td>
+                </tr>`
+              )}
+            </tbody>
+          </table></div>
+          ${pageNo > 1 || hasNext
+            ? html`<nav class="pager" aria-label="Pages">
+                ${pageNo > 1 ? html`<a class="btn btn-secondary pager-prev" rel="prev" href="${href(pageNo - 1)}">Previous 50</a>` : ''}
+                ${hasNext ? html`<a class="btn btn-secondary pager-next" rel="next" href="${href(pageNo + 1)}">Next 50</a>` : ''}
+              </nav>`
+            : ''}`}`,
+  });
+}
+
 function register(router) {
+  router.get('/app/candidates', requireUser, searchPage);
   router.get('/app/applications/:id', requireUser, candidatePage);
   router.post('/app/applications/:id/stage', requireUser, internalForm, changeStage);
   router.post('/app/applications/:id/voltax', requireUser, internalForm, recordVoltax);

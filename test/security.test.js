@@ -139,18 +139,18 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       const roleA = await makeRole(t.db, { title: 'Role A', assigned: rep });
       const roleB = await makeRole(t.db, { title: 'Role B', assigned: rep });
       const quiet = await makeRole(t.db, { title: 'Quiet', assigned: rep });
-      const row = (text, id) => new RegExp(`<tr data-role-id="${id}">[\\s\\S]*?</tr>`).exec(text)[0];
-      const newCell = (text, id) => /<td class="num[^"]*" data-stage="new">[\s\S]*?<\/td>/.exec(row(text, id))[0];
+      const row = (text, id) => new RegExp(`data-role-id="${id}">[\\s\\S]*?<div class="role-row-action">`).exec(text)[0];
+      const newCell = (text, id) => /<li class="stage-seg stage-new[^"]*" data-stage="new">[\s\S]*$/.exec(row(text, id))[0];
       const stamp = async () => (await t.db.get("SELECT dashboard_seen_at FROM users WHERE email = 'rep@fansided.com'")).dashboard_seen_at;
       await t.client().apply(roleA, { email: 'before1@example.com' }); // arrived before the first visit
 
       let c = t.client();
       await c.login('rep@fansided.com');
       const first = await c.get('/app');
-      assert.match(newCell(first.text, roleA), /class="num highlight"/);
-      assert.match(newCell(first.text, roleA), />1</);
+      assert.match(newCell(first.text, roleA), /stage-new is-hot/);
+      assert.match(newCell(first.text, roleA), /stage-seg-n">1</);
       assert.doesNotMatch(first.text, /since your last visit/);
-      assert.doesNotMatch(newCell(first.text, quiet), /highlight/); // zero New is not highlighted
+      assert.doesNotMatch(newCell(first.text, quiet), /is-hot/); // zero New is not highlighted
       assert.equal(await stamp(), null, 'GET /app must not write the stamp');
       assert.match(first.text, /<form method="post" action="\/app\/seen"[^>]*>[\s\S]*?name="csrf"[\s\S]*?Mark as seen/);
 
@@ -169,8 +169,8 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       t = await t.restart(); // nothing is kept in memory
       c.base = t.base;
       const seen = await c.get('/app');
-      assert.match(newCell(seen.text, roleA), />3 <span class="since" data-since="2">\+2 since your last visit<\/span>/);
-      assert.match(newCell(seen.text, roleA), /highlight/);
+      assert.match(newCell(seen.text, roleA), /stage-seg-n">3<[\s\S]*<span class="since" data-since="2">\+2 since your last visit<\/span>/);
+      assert.match(newCell(seen.text, roleA), /is-hot/);
       assert.match(newCell(seen.text, roleB), /\+1 since your last visit/);
       assert.doesNotMatch(row(seen.text, quiet), /since your last visit/);
       // F-09: reloading (GET) does not clear it any more.
@@ -189,7 +189,7 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       assert.equal(all.headers.get('location'), '/app?view=all');
       const cleared = await c.get('/app');
       assert.doesNotMatch(cleared.text, /since your last visit/);
-      assert.match(newCell(cleared.text, roleA), />3</);
+      assert.match(newCell(cleared.text, roleA), /stage-seg-n">3</);
 
       // Per user: another rep's stamp is independent.
       await makeRole(t.db, { title: 'Other role', assigned: other });

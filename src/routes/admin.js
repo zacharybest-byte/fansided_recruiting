@@ -15,7 +15,19 @@ const { loadSample, removeSample, sampleCounts, ROLES, PEOPLE_COUNT } = require(
 const MAX_QUESTIONS = 5;
 
 function fieldError(errors, name) {
-  return errors[name] ? html`<span class="error">${errors[name]}</span>` : '';
+  return errors[name] ? html`<p class="error" id="err-${name}">${errors[name]}</p>` : '';
+}
+
+// One labelled field with optional help text and inline error; `control(attrs)` renders the input.
+function field(errors, name, label, { help = '', required = false, id = `f-${name}` } = {}, control) {
+  const describedBy = [help ? `help-${name}` : '', errors[name] ? `err-${name}` : ''].filter(Boolean).join(' ');
+  const attrs = raw(`id="${id}"${describedBy ? ` aria-describedby="${describedBy}"` : ''}${errors[name] ? ' aria-invalid="true"' : ''}`);
+  return html`<div class="field${errors[name] ? ' has-error' : ''}">
+    <label for="${id}">${label}${required ? html` <span class="req" aria-hidden="true">*</span><span class="visually-hidden"> (required)</span>` : ''}</label>
+    ${help ? html`<p class="help" id="help-${name}">${help}</p>` : ''}
+    ${control(attrs)}
+    ${fieldError(errors, name)}
+  </div>`;
 }
 
 // ---------- Templates ----------
@@ -24,22 +36,29 @@ async function templatesPage(ctx) {
   const templates = await ctx.app.db.all('SELECT * FROM email_templates ORDER BY name COLLATE NOCASE');
   page(ctx, {
     title: 'Email templates',
-    body: html`<h1>Email templates</h1>
-      <p><a href="/app/admin/templates/new" class="button">New template</a></p>
-      <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Subject</th><th>Updated</th><th></th></tr></thead><tbody>
+    body: html`<div class="page-header">
+        <div><h1>Email templates</h1><p class="lede">Reusable messages reps load into the email composer on a candidate page.</p></div>
+        <div class="page-actions"><a href="/app/admin/templates/new" class="btn btn-primary">New template</a></div>
+      </div>
+      ${templates.length === 0
+        ? html`<div class="empty"><h2>No templates yet</h2><p>Write the replies you send most often, such as a thank-you or a trial invitation, so reps can load them in one click.</p>
+            <p><a class="btn btn-primary" href="/app/admin/templates/new">Create the first template</a></p></div>`
+        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Subject</th><th>Updated</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
         ${templates.map(
-          (t) => html`<tr><td><a href="/app/admin/templates/${t.id}">${t.name}</a></td><td>${t.subject}</td><td>${fmtDate(ctx, t.updated_at)}</td>
-            <td><form method="post" action="/app/admin/templates/${t.id}/delete" class="inline">${csrfField(ctx)}
-              <button type="submit" class="link danger" data-confirm="Delete this template?">Delete</button></form></td></tr>`
+          (t) => html`<tr><td><a href="/app/admin/templates/${t.id}"><strong>${t.name}</strong></a></td><td>${t.subject}</td><td>${fmtDate(ctx, t.updated_at)}</td>
+            <td><div class="row-actions"><a href="/app/admin/templates/${t.id}">Edit</a>
+              <form method="post" action="/app/admin/templates/${t.id}/delete" class="inline">${csrfField(ctx)}
+              <button type="submit" class="link danger" data-confirm="Delete this template?">Delete<span class="visually-hidden"> ${t.name}</span></button></form></div></td></tr>`
         )}
-      </tbody></table></div>
-      ${mergeFieldHelp()}`,
+      </tbody></table></div>`}`,
   });
 }
 
 function mergeFieldHelp() {
-  return html`<h2>Merge fields</h2><ul>${Object.entries(MERGE_FIELDS).map(([k, v]) => html`<li><code>{{${k}}}</code>: ${v}</li>`)}</ul>
-    <p class="muted">Any other <code>{{…}}</code> stays as typed, and the rep sees a warning when loading the template.</p>`;
+  return html`<aside class="card help-aside" aria-labelledby="merge-h"><h2 id="merge-h">Merge fields</h2>
+    <p>Type these in the subject or body. They are filled in when a rep loads the template.</p>
+    <ul>${Object.entries(MERGE_FIELDS).map(([k, v]) => html`<li><code>{{${k}}}</code>: ${v}</li>`)}</ul>
+    <p class="muted">Any other <code>{{…}}</code> stays as typed, and the rep sees a warning when loading the template.</p></aside>`;
 }
 
 function templateForm(ctx, t, { errors = {}, status = 200 } = {}) {
@@ -47,16 +66,18 @@ function templateForm(ctx, t, { errors = {}, status = 200 } = {}) {
   page(ctx, {
     title: isNew ? 'New template' : 'Edit template',
     status,
-    body: html`<p><a href="/app/admin/templates">← Templates</a></p>
-      <h1>${isNew ? 'New template' : `Edit: ${t.name}`}</h1>
-      <form method="post" action="${isNew ? '/app/admin/templates' : `/app/admin/templates/${t.id}`}" class="stacked">
+    body: html`<a class="back" href="/app/admin/templates">Email templates</a>
+      <div class="page-header"><div><h1>${isNew ? 'New template' : `Edit ${t.name}`}</h1></div></div>
+      <div class="grid-2 wide-left">
+      <form method="post" action="${isNew ? '/app/admin/templates' : `/app/admin/templates/${t.id}`}" class="card">
         ${csrfField(ctx)}
-        <label>Name <input type="text" name="name" maxlength="200" value="${t.name || ''}" required></label>${fieldError(errors, 'name')}
-        <label>Subject <input type="text" name="subject" maxlength="200" value="${t.subject || ''}" required></label>${fieldError(errors, 'subject')}
-        <label>Body (plain text) <textarea name="body" rows="12" maxlength="10000" required>${t.body || ''}</textarea></label>${fieldError(errors, 'body')}
-        <p><button type="submit" class="primary">Save</button></p>
+        ${field(errors, 'name', 'Name', { required: true, help: 'Reps see this name in the template list.' }, (a) => html`<input type="text" ${a} name="name" maxlength="200" value="${t.name || ''}" required>`)}
+        ${field(errors, 'subject', 'Subject', { required: true }, (a) => html`<input type="text" ${a} name="subject" maxlength="200" value="${t.subject || ''}" required>`)}
+        ${field(errors, 'body', 'Body', { required: true, help: 'Plain text. Line breaks are kept.' }, (a) => html`<textarea ${a} name="body" rows="12" maxlength="10000" required>${t.body || ''}</textarea>`)}
+        <div class="form-actions"><button type="submit" class="btn btn-primary">Save template</button><a class="btn btn-secondary" href="/app/admin/templates">Cancel</a></div>
       </form>
-      ${mergeFieldHelp()}`,
+      ${mergeFieldHelp()}
+      </div>`,
   });
 }
 
@@ -88,15 +109,19 @@ async function rolesPage(ctx) {
   );
   page(ctx, {
     title: 'Roles',
-    body: html`<h1>Roles</h1>
-      <p><a href="/app/admin/roles/new" class="button">New role</a></p>
-      <div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th></tr></thead><tbody>
+    body: html`<div class="page-header">
+        <div><h1>Roles</h1><p class="lede">The openings shown on the public careers page, and who looks after each one.</p></div>
+        <div class="page-actions"><a href="/app/admin/roles/new" class="btn btn-primary">New role</a></div>
+      </div>
+      ${roles.length === 0
+        ? html`<div class="empty"><h2>No roles yet</h2><p>Create a role to open applications for it.</p><p><a class="btn btn-primary" href="/app/admin/roles/new">Create the first role</a></p></div>`
+        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th></tr></thead><tbody>
         ${roles.map(
-          (r) => html`<tr><td><a href="/app/admin/roles/${r.id}">${r.title}</a></td><td>${r.vertical}</td><td>${r.site_name}</td>
-            <td><span class="status status-${r.status}">${r.status}</span></td><td>${r.rep_name || r.rep_email || ''}</td>
+          (r) => html`<tr><td><a href="/app/admin/roles/${r.id}"><strong>${r.title}</strong></a></td><td>${r.vertical}</td><td>${r.site_name}</td>
+            <td><span class="status status-${r.status}">${r.status === 'open' ? 'Open' : 'Closed'}</span></td><td>${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</td>
             <td class="num"><a href="/app/roles/${r.id}">${r.n}</a></td></tr>`
         )}
-      </tbody></table></div>`,
+      </tbody></table></div>`}`,
   });
 }
 
@@ -110,41 +135,51 @@ async function roleForm(ctx, r, { errors = {}, status = 200 } = {}) {
   page(ctx, {
     title: isNew ? 'New role' : 'Edit role',
     status,
-    body: html`<p><a href="/app/admin/roles">← Roles</a>${isNew ? '' : html` · <a href="/app/roles/${r.id}">Pipeline</a>`}</p>
-      <h1>${isNew ? 'New role' : `Edit: ${r.title}`}</h1>
-      <form method="post" action="${isNew ? '/app/admin/roles' : `/app/admin/roles/${r.id}`}" class="stacked">
+    body: html`<a class="back" href="/app/admin/roles">Roles</a>
+      <div class="page-header">
+        <div><h1>${isNew ? 'New role' : `Edit ${r.title}`}</h1></div>
+        ${isNew ? '' : html`<div class="page-actions"><a class="btn btn-secondary" href="/app/roles/${r.id}">Open pipeline</a></div>`}
+      </div>
+      <form method="post" action="${isNew ? '/app/admin/roles' : `/app/admin/roles/${r.id}`}" class="stack-form">
         ${csrfField(ctx)}
-        <label>Title <input type="text" name="title" maxlength="200" value="${r.title || ''}" required></label>${fieldError(errors, 'title')}
-        <label>Vertical <input type="text" name="vertical" maxlength="100" list="verticals" value="${r.vertical || ''}" required></label>${fieldError(errors, 'vertical')}
-        <datalist id="verticals">${verticals.map((v) => html`<option value="${v.vertical}">`)}</datalist>
-        <label>Site name <input type="text" name="site_name" maxlength="200" value="${r.site_name || ''}"></label>${fieldError(errors, 'site_name')}
-        <label>Description (plain text; line breaks are kept) <textarea name="description" rows="10" maxlength="20000">${r.description || ''}</textarea></label>${fieldError(errors, 'description')}
-        <label>Status
-          <select name="status">
-            <option value="open"${r.status !== 'closed' ? raw(' selected') : ''}>Open</option>
-            <option value="closed"${r.status === 'closed' ? raw(' selected') : ''}>Closed</option>
-          </select>
-        </label>
-        <label>Assigned rep
-          <select name="assigned_user_id">
-            <option value="">Unassigned</option>
-            ${users
-              .filter((u) => u.active || u.id === r.assigned_user_id)
-              .map((u) => html`<option value="${u.id}"${u.id === r.assigned_user_id ? raw(' selected') : ''}>${u.name || u.email}${u.active ? '' : ' (inactive)'}</option>`)}
-          </select>
-        </label>${fieldError(errors, 'assigned_user_id')}
-        <fieldset>
-          <legend>Questionnaire (up to ${MAX_QUESTIONS} questions; leave blank to skip)</legend>
+        <fieldset class="form-section">
+          <legend>The role</legend>
+          ${field(errors, 'title', 'Title', { required: true, help: 'Shown on the careers page, for example "Kansas City Chiefs contributor".' }, (a) => html`<input type="text" ${a} name="title" maxlength="200" value="${r.title || ''}" required>`)}
+          <div class="field-row">
+            ${field(errors, 'vertical', 'Vertical', { required: true, help: 'The group it is listed under, such as NFL or NBA.' }, (a) => html`<input type="text" ${a} name="vertical" maxlength="100" list="verticals" value="${r.vertical || ''}" required>`)}
+            ${field(errors, 'site_name', 'Site name', { help: 'The FanSided site the writer would join.' }, (a) => html`<input type="text" ${a} name="site_name" maxlength="200" value="${r.site_name || ''}">`)}
+          </div>
+          <datalist id="verticals">${verticals.map((v) => html`<option value="${v.vertical}">`)}</datalist>
+          ${field(errors, 'description', 'Description', { help: 'Plain text. Line breaks are kept, and a blank line starts a new paragraph.' }, (a) => html`<textarea ${a} name="description" rows="10" maxlength="20000">${r.description || ''}</textarea>`)}
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>Status and rep</legend>
+          <div class="field-row">
+            <div class="field"><label for="f-status">Status</label><p class="help" id="help-status">Closed roles disappear from the careers page.</p>
+              <select name="status" id="f-status" aria-describedby="help-status">
+                <option value="open"${r.status !== 'closed' ? raw(' selected') : ''}>Open</option>
+                <option value="closed"${r.status === 'closed' ? raw(' selected') : ''}>Closed</option>
+              </select></div>
+            ${field(errors, 'assigned_user_id', 'Assigned rep', { help: 'The rep who looks after this role’s candidates.' }, (a) => html`<select ${a} name="assigned_user_id">
+              <option value="">Unassigned</option>
+              ${users
+                .filter((u) => u.active || u.id === r.assigned_user_id)
+                .map((u) => html`<option value="${u.id}"${u.id === r.assigned_user_id ? raw(' selected') : ''}>${u.name || u.email}${u.active ? '' : ' (inactive)'}</option>`)}
+            </select>`)}
+          </div>
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>Questionnaire</legend>
+          <p class="help">Up to ${MAX_QUESTIONS} questions applicants answer. Leave a row blank to skip it.${isNew ? '' : ' Editing questions does not change answers already submitted.'}</p>
           ${questions.map(
             (q, i) => html`<div class="question-row">
-              <label>Question ${i + 1} <input type="text" name="q_text_${i}" maxlength="500" value="${q.text}"></label>
+              <div class="field"><label for="f-q${i}">Question ${i + 1}</label><input type="text" id="f-q${i}" name="q_text_${i}" maxlength="500" value="${q.text}"></div>
               <label class="check"><input type="checkbox" name="q_required_${i}" value="1"${q.required ? raw(' checked') : ''}> Required</label>
             </div>`
           )}
           ${fieldError(errors, 'questions')}
-          ${isNew ? '' : html`<p class="muted">Editing questions does not change answers already submitted.</p>`}
         </fieldset>
-        <p><button type="submit" class="primary">Save role</button></p>
+        <div class="form-actions"><button type="submit" class="btn btn-primary">Save role</button><a class="btn btn-secondary" href="/app/admin/roles">Cancel</a></div>
       </form>`,
   });
 }
@@ -207,50 +242,54 @@ async function usersPage(ctx, { errors = {}, values = {}, status = 200, link = n
   page(ctx, {
     title: 'Users',
     status,
-    body: html`<h1>Users</h1>
+    body: html`<div class="page-header">
+        <div><h1>Users</h1><p class="lede">Everyone who can sign in to Recruit. Admins manage roles, templates and users; reps work the pipelines.</p></div>
+        <div class="page-actions"><a href="#add-user" class="btn btn-primary">Add a user</a></div>
+      </div>
       ${link
-        ? html`<section class="card" id="new-link">
+        ? html`<section class="card link-box" id="new-link">
             <h2>${link.kind === 'invite' ? 'Invite link' : 'Password reset link'} for ${linkEmail}</h2>
             <p><strong>Copy this link now and send it to them. It is shown only once</strong> and works once
               (${link.kind === 'invite' ? `${INVITE_DAYS} days` : `${RESET_HOURS} hours`}).${link.relative ? ' BASE_URL is not set: put your site address in front of it.' : ''}</p>
-            <p><input type="text" readonly id="link-url" class="wide" value="${link.url}" aria-label="Link" size="80"></p>
+            <div class="field"><label for="link-url">Link</label><input type="text" readonly id="link-url" class="wide" value="${link.url}" size="80"></div>
           </section>`
         : ''}
-      <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th></th></tr></thead><tbody>
+      <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th>Actions</th></tr></thead><tbody>
         ${users.map(
           (u) => html`<tr class="${u.active ? '' : 'inactive'}" data-user-id="${u.id}">
             <td><form method="post" action="/app/admin/users/${u.id}/name" class="inline nowrap">${csrfField(ctx)}
               <input type="text" name="name" value="${u.name}" maxlength="200" required aria-label="Display name for ${u.email}" placeholder="Display name">
-              <button type="submit">Save</button></form></td>
+              <button type="submit" class="btn btn-sm btn-secondary">Save name</button></form></td>
             <td class="wrap">${u.email}</td>
             <td><form method="post" action="/app/admin/users/${u.id}/role" class="inline nowrap">${csrfField(ctx)}
-              <select name="role" aria-label="Role">
+              <select name="role" aria-label="Role for ${u.email}">
                 <option value="rep"${u.role === 'rep' ? raw(' selected') : ''}>Rep</option>
                 <option value="admin"${u.role === 'admin' ? raw(' selected') : ''}>Admin</option>
-              </select> <button type="submit">Change</button></form></td>
+              </select> <button type="submit" class="btn btn-sm btn-secondary">Change role</button></form></td>
             <td class="status-cell">${statusOf(u)}</td>
             <td class="num">${u.role_count}</td>
-            <td>${u.active
+            <td><div class="row-actions">${u.active
               ? html`<form method="post" action="/app/admin/users/${u.id}/reset-link" class="inline">${csrfField(ctx)}<button type="submit" class="link">${u.has_password ? 'Create reset link' : 'New invite link'}</button></form>
                  <form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link danger" data-confirm="Deactivate ${u.name || u.email}? They will be signed out and can no longer sign in.">Deactivate</button></form>`
-              : html`<form method="post" action="/app/admin/users/${u.id}/reactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link">Reactivate</button></form>`}</td>
+              : html`<form method="post" action="/app/admin/users/${u.id}/reactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link">Reactivate</button></form>`}</div></td>
           </tr>`
         )}
       </tbody></table></div>
-      <h2>Add a user</h2>
-      <p class="muted">You get a single-use invite link to send to them. They choose their own password.</p>
-      <form method="post" action="/app/admin/users" class="stacked narrow">
-        ${csrfField(ctx)}
-        <label>Email <input type="email" name="email" maxlength="254" value="${values.email || ''}" required></label>${fieldError(errors, 'email')}
-        <label>Name <input type="text" name="name" maxlength="200" value="${values.name || ''}" required></label>${fieldError(errors, 'name')}
-        <label>Role
-          <select name="role">
-            <option value="rep"${values.role !== 'admin' ? raw(' selected') : ''}>Rep</option>
-            <option value="admin"${values.role === 'admin' ? raw(' selected') : ''}>Admin</option>
-          </select>
-        </label>
-        <p><button type="submit" class="primary">Add user</button></p>
-      </form>`,
+      <section class="card centred-card" id="add-user">
+        <h2>Add a user</h2>
+        <p class="fine-print">You get a single-use invite link to send to them. They choose their own password.</p>
+        <form method="post" action="/app/admin/users">
+          ${csrfField(ctx)}
+          ${field(errors, 'email', 'Email', { required: true }, (a) => html`<input type="email" ${a} name="email" maxlength="254" value="${values.email || ''}" required>`)}
+          ${field(errors, 'name', 'Name', { required: true, help: 'Shown to the team and on assigned roles.' }, (a) => html`<input type="text" ${a} name="name" maxlength="200" value="${values.name || ''}" required>`)}
+          <div class="field"><label for="f-role-new">Role</label>
+            <select name="role" id="f-role-new">
+              <option value="rep"${values.role !== 'admin' ? raw(' selected') : ''}>Rep</option>
+              <option value="admin"${values.role === 'admin' ? raw(' selected') : ''}>Admin</option>
+            </select></div>
+          <div class="form-actions"><button type="submit" class="btn btn-primary">Create invite link</button></div>
+        </form>
+      </section>`,
   });
 }
 
@@ -473,14 +512,17 @@ function register(router) {
     if (roles.length && ctx.form.get('confirm') !== '1') {
       return page(ctx, {
         title: 'Deactivate user',
-        body: html`<h1>Deactivate ${u.name || u.email}?</h1>
-          <p class="flash flash-error">Warning: ${u.name || u.email} is still the assigned rep for ${roles.length} role${roles.length === 1 ? '' : 's'}:</p>
+        body: html`<div class="card card-danger centred-card">
+          <h1>Deactivate ${u.name || u.email}?</h1>
+          <p class="flash flash-error">Warning: ${u.name || u.email} is still the assigned rep for ${roles.length} role${roles.length === 1 ? '' : 's'}.</p>
           <ul>${roles.map((r) => html`<li><a href="/app/roles/${r.id}">${r.title}</a>${r.status === 'closed' ? ' (closed)' : ''}</li>`)}</ul>
-          <p>Reassign these roles after deactivating.</p>
-          <form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">
+          <p>Reassign ${roles.length === 1 ? 'this role' : 'these roles'} after deactivating.</p>
+          <form method="post" action="/app/admin/users/${u.id}/deactivate" class="form-actions">
             ${csrfField(ctx)}<input type="hidden" name="confirm" value="1">
-            <button type="submit" class="danger">Deactivate anyway</button> <a href="/app/admin/users">Cancel</a>
-          </form>`,
+            <button type="submit" class="btn btn-danger">Deactivate anyway</button>
+            <a class="btn btn-secondary" href="/app/admin/users">Cancel</a>
+          </form>
+        </div>`,
       });
     }
     // One atomic batch. The last-admin and not-yourself guards are inside the UPDATE; sessions and unused

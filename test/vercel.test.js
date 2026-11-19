@@ -229,7 +229,7 @@ for (const driver of DRIVERS) describe(`AC-56 [${driver}]`, () => {
         // public pages
         for (const u of ['/', `/roles/${roleId}`, '/thanks', '/login', `/roles/${roleId}/apply`]) await hit(`GET ${u}`, anon, 'GET', u, u.endsWith('/apply') ? 303 : 200);
         // internal pages (admin sees all)
-        const pages = ['/app', '/app/account', '/app/export', '/app/export.csv', `/app/roles/${roleId}`, `/app/applications/${appId.id}`, `/app/people/${appId.person_id}/delete`, '/app/admin/roles', '/app/admin/roles/new', `/app/admin/roles/${roleId}`, '/app/admin/templates', '/app/admin/templates/new', '/app/admin/templates/1', '/app/admin/users', '/app/admin/sample'];
+        const pages = ['/app', '/app/candidates', '/app/candidates?q=pat', '/app/account', '/app/export', '/app/export.csv', `/app/roles/${roleId}`, `/app/applications/${appId.id}`, `/app/people/${appId.person_id}/delete`, '/app/admin/roles', '/app/admin/roles/new', `/app/admin/roles/${roleId}`, '/app/admin/templates', '/app/admin/templates/new', '/app/admin/templates/1', '/app/admin/users', '/app/admin/sample'];
         for (const u of pages) {
           const res = await hit(`GET ${u}`, admin, 'GET', u, 200);
           if (!u.startsWith('/app/export.csv')) assert.equal(res.headers.get('cache-control'), 'no-store', `${u} no-store`);

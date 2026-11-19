@@ -13,10 +13,10 @@ let roleB;
 let roleC;
 
 function dashboardCounts(htmlText, roleId) {
-  const row = new RegExp(`<tr data-role-id="${roleId}">([\\s\\S]*?)</tr>`).exec(htmlText);
+  const row = new RegExp(`data-role-id="${roleId}">([\\s\\S]*?)</ol>`).exec(htmlText);
   if (!row) return null;
   const out = {};
-  for (const m of row[1].matchAll(/data-stage="(\w+)">(\d+)</g)) out[m[1]] = Number(m[2]);
+  for (const m of row[1].matchAll(/data-stage="(\w+)"><span class="stage-seg-n">(\d+)</g)) out[m[1]] = Number(m[2]);
   return out;
 }
 
@@ -49,7 +49,7 @@ test('AC-18: dashboard shows my roles with per-stage counts; All roles shows eve
   assert.deepEqual(dashboardCounts(mine.text, roleA), { new: 2, reviewing: 0, trial: 1, onboarded: 0, passed: 0 });
   assert.ok(dashboardCounts(mine.text, roleC)); // closed but assigned: still listed internally
   assert.equal(dashboardCounts(mine.text, roleB), null);
-  assert.match(mine.text, /class="num highlight" data-stage="new">2</); // new counts highlighted
+  assert.match(mine.text, /class="stage-seg stage-new is-hot" data-stage="new"><span class="stage-seg-n">2</); // new counts highlighted
   const all = await c.get('/app?view=all');
   assert.deepEqual(dashboardCounts(all.text, roleB), { new: 1, reviewing: 0, trial: 0, onboarded: 0, passed: 0 });
   assert.ok(dashboardCounts(all.text, roleA));
@@ -61,7 +61,7 @@ test('AC-19: role pipeline shows the five stages in fixed order', async () => {
   const c = t.client();
   await c.login('rep1@fansided.com');
   const res = await c.get(`/app/roles/${roleA}`);
-  const order = [...res.text.matchAll(/<section class="stage-section" id="stage-(\w+)"/g)].map((m) => m[1]);
+  const order = [...res.text.matchAll(/<section class="board-col stage-\w+" id="stage-(\w+)"/g)].map((m) => m[1]);
   assert.deepEqual(order, ['new', 'reviewing', 'trial', 'onboarded', 'passed']);
   const trialSection = res.text.split('id="stage-trial"')[1].split('</section>')[0];
   assert.match(trialSection, /d1@example.com/);
@@ -69,7 +69,7 @@ test('AC-19: role pipeline shows the five stages in fixed order', async () => {
   assert.match(newSection, /d2@example.com/);
   assert.match(newSection, /d3@example.com/);
   assert.match(res.text, /Reassign rep/);
-  assert.match(newSection, /data-href="\/app\/applications\/\d+"/);
+  assert.match(newSection, /class="cand-name" href="\/app\/applications\/\d+"/);
 });
 
 test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log is append-only', async () => {
@@ -111,7 +111,7 @@ test('AC-20 + AC-21: stage changes add events with from/to/actor/time; the log i
 
   const page = await c.get(`/app/applications/${id}`);
   assert.match(page.text, /Stage: Trial → Passed/);
-  assert.match(page.text, /Applied \(stage New\) <span class="meta">· System/);
+  assert.match(page.text, /Applied \(stage New\) <span class="meta">System,/);
 });
 
 test('AC-22: Onboarded with Voltax ID and date saves both, sets onboarded_at and calls voltax.createUser', async () => {
@@ -194,7 +194,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   await c.post(`/app/applications/${first}/email`, { via: 'gmail', subject: 'Earlier email', body: 'Sent on the first application' });
 
   const page1 = await c.get(`/app/applications/${first}`);
-  assert.match(page1.text, /Rep Two · \d{4}-\d{2}-\d{2} \d{2}:\d{2}/); // author and time
+  assert.match(page1.text, /Rep Two, \d{4}-\d{2}-\d{2} \d{2}:\d{2}/); // author and time
   assert.match(page1.text, /Good writer, wrong team/);
 
   const second = await applyTo(roleB, 'REPEAT@example.com', 'Rae Peat');
@@ -204,7 +204,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   const notes = page2.text.split('id="notes"')[1].split('</section>')[0];
   assert.match(notes, /<span class="tag">Role A<\/span>/); // tagged with the application's role
   const history = page2.text.split('id="history"')[1].split('</section>')[0];
-  assert.match(history, new RegExp(`<a href="/app/applications/${first}">Role A</a></td><td>\\d{4}-\\d{2}-\\d{2}</td><td>Passed</td>`));
+  assert.match(history, new RegExp(`<a href="/app/applications/${first}">Role A</a></td><td>\\d{4}-\\d{2}-\\d{2}</td><td><span class="stage-badge stage-passed">Passed</span></td>`));
 
   // A note on the second application shows on the first too, newest first.
   await c.post(`/app/applications/${second}/notes`, { body: 'Reapplied for B' });
