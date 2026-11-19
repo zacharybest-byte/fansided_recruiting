@@ -213,13 +213,25 @@ async function makeUser(db, { email, name = email.split('@')[0], role = 'rep', a
   return r.lastInsertRowid;
 }
 
-async function makeRole(db, { title = 'Test Role', vertical = 'NFL', site = 'Test Site', status = 'open', assigned = null, questions = [], description = 'A role.', progress } = {}) {
+// A questionnaire (name + questions). Returns its id.
+async function makeQuestionnaire(db, { name = 'Test questionnaire', questions = [{ text: 'Why us?', required: true }], isSample = 0 } = {}) {
   const now = nowIso();
+  const r = await db.run('INSERT INTO questionnaires (name, questions_json, is_sample, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', [name, JSON.stringify(questions), isSample, now, now]);
+  return r.lastInsertRowid;
+}
+
+// `questions` (a list) creates a questionnaire for the role, named "<title> questions"; `questionnaire` (an id) uses an
+// existing one. Like the admin screen, the legacy job_roles.questions_json gets a copy of the questionnaire's questions.
+async function makeRole(db, { title = 'Test Role', vertical = 'NFL', site = 'Test Site', status = 'open', assigned = null, questions = [], questionnaire = null, description = 'A role.', progress } = {}) {
+  const now = nowIso();
+  let questionnaireId = questionnaire;
+  if (questionnaireId === null && questions.length) questionnaireId = await makeQuestionnaire(db, { name: `${title} questions`, questions });
   // Like the admin screen: the role and its workflow in one batch.
   const results = await db.batch([
     {
-      sql: 'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      args: [title, vertical, site, description, status, assigned, JSON.stringify(questions), now, now],
+      sql: `INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, questionnaire_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT questions_json FROM questionnaires WHERE id = ?), '[]'), ?, ?, ?)`,
+      args: [title, vertical, site, description, status, assigned, questionnaireId, questionnaireId, now, now],
     },
     ...insertStagesAfterRole(progress || DEFAULT_PROGRESS, now),
   ]);
@@ -247,4 +259,4 @@ async function count(db, table, where = '1=1', ...args) {
   return (await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, args)).n;
 }
 
-module.exports = { DRIVERS, TEST_PASSWORD, SESSION_SECRET, startApp, freshDb, Client, makeUser, makeRole, lastApplication, count, stageId, moveStage };
+module.exports = { DRIVERS, TEST_PASSWORD, SESSION_SECRET, startApp, freshDb, Client, makeUser, makeRole, makeQuestionnaire, lastApplication, count, stageId, moveStage };

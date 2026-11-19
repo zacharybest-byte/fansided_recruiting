@@ -186,6 +186,18 @@ body.is-public main { max-width: 1120px; padding-top: var(--sp-6); padding-botto
 .nav a:hover, .nav-menu-list a:hover, .masthead-user a:hover, .masthead-user .link:hover { background: var(--brand-hover); box-shadow: inset 0 -4px 0 var(--brand-2); }
 .nav-bar a[aria-current="page"], .masthead-user a[aria-current="page"] { box-shadow: inset 0 -4px 0 var(--brand-2); }
 .nav-group { display: flex; align-items: stretch; gap: var(--sp-1); margin-left: var(--sp-3); padding-left: var(--sp-4); border-left: 1px solid rgba(255, 255, 255, 0.3); }
+.nav-manage { position: relative; display: flex; align-items: stretch; margin-left: var(--sp-3); padding-left: var(--sp-4); border-left: 1px solid rgba(255, 255, 255, 0.3); }
+.nav-manage > summary { display: inline-flex; align-items: center; gap: var(--sp-2); padding: 0 var(--sp-3); min-height: 2.75rem; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; list-style: none; white-space: nowrap; }
+.nav-manage > summary::-webkit-details-marker { display: none; }
+.nav-manage > summary::after { content: ""; width: 0.5rem; height: 0.5rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-2px) rotate(45deg); }
+.nav-manage[open] > summary::after { transform: translateY(2px) rotate(-135deg); }
+.nav-manage > summary:hover, .nav-manage[open] > summary { background: var(--brand-hover); box-shadow: inset 0 -4px 0 var(--brand-2); }
+.nav-manage.is-current > summary { box-shadow: inset 0 -4px 0 var(--brand-2); }
+.nav-manage > summary:focus-visible { outline: 3px solid var(--brand-2); outline-offset: -3px; box-shadow: none; }
+.nav-manage-list { position: absolute; top: 100%; left: var(--sp-4); z-index: 20; min-width: 13rem; display: flex; flex-direction: column; padding: var(--sp-2) 0; background: var(--brand-deep); border: 1px solid rgba(255, 255, 255, 0.2); border-top: 0; }
+.nav-manage-list a { min-height: 2.75rem; padding: 0 var(--sp-4); }
+.nav-manage-list a:hover { box-shadow: inset 4px 0 0 var(--brand-2); }
+.nav-manage-list a[aria-current="page"] { box-shadow: inset 4px 0 0 var(--brand-2); background: var(--brand-hover); }
 .nav-label { display: inline-flex; align-items: center; font-size: var(--fs-xs); color: var(--brand-tint); padding-right: var(--sp-1); }
 .masthead-user { margin-left: auto; display: flex; align-items: center; gap: var(--sp-1); }
 .masthead-user form { margin: 0; display: inline-flex; }
@@ -299,6 +311,22 @@ form.stacked label input, form.stacked label textarea, form.stacked label select
 form.stacked label.check, form.stacked label.check input { display: inline-flex; margin-top: 0; width: auto; }
 form.stacked.narrow, form.narrow { max-width: 30rem; }
 fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 0 0 var(--sp-4); min-width: 0; }
+/* Questionnaires: read-only question lists (role form preview, delete page) and the "used by" notice */
+.qn-preview { background: var(--field); border: 1px solid var(--line); border-left: 4px solid var(--brand-2); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) 0; }
+.qn-preview h3 { font-size: var(--fs-base); margin: 0 0 var(--sp-2); }
+.qn-preview p:last-child { margin-bottom: 0; }
+.qn-questions { margin: 0 0 var(--sp-2); padding-left: 1.5rem; }
+.qn-questions li { margin: 0 0 var(--sp-2); overflow-wrap: anywhere; }
+.qn-flag { display: inline-block; margin-left: var(--sp-2); font-size: var(--fs-xs); color: var(--mute); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 0 var(--sp-2); white-space: nowrap; }
+.qn-flag.is-required { color: var(--brand); border-color: var(--brand); font-weight: 700; }
+.qn-links { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-5); margin: var(--sp-2) 0 0; }
+.qn-roles { list-style: none; margin: var(--sp-1) 0 0; padding: 0; }
+.qn-roles li { margin: 0 0 var(--sp-1); overflow-wrap: anywhere; }
+.notice-card { border-left: 4px solid var(--brand-2); }
+.notice-card h2 { margin-bottom: var(--sp-1); }
+.notice-card .qn-roles { columns: 2 16rem; }
+.card .qn-roles { margin-bottom: var(--sp-4); }
+td .qn-roles { margin-top: var(--sp-1); }
 .question-row { display: flex; gap: var(--sp-4); align-items: flex-end; flex-wrap: wrap; }
 .question-row label:first-child { flex: 1; min-width: 14rem; }
 .question-row label.check { white-space: nowrap; }

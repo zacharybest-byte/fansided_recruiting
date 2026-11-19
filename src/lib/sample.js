@@ -5,9 +5,36 @@
 // Load and Remove are each ONE db.batch. Ids are found with subselects on the unique sample email / role title,
 // so the same statements work on both database drivers.
 const { stageRows, insertStagesWhere, legacyCategory, DEFAULT_PROGRESS } = require('./stages');
+const { serialise } = require('./questionnaires');
 
 const DAY = 86400000;
 const SAMPLE_DOMAIN = 'sample.invalid';
+
+// Three questionnaires shared across the six roles, so the demo shows one set of questions serving several roles.
+const QUESTIONNAIRES = {
+  team: {
+    name: 'Team site contributor',
+    questions: [
+      { text: 'Which storyline around your team are you following most closely this season, and why?', required: true },
+      { text: 'Link your best piece of game or team analysis and tell us what you are proud of.', required: false },
+      { text: 'How many hours a week can you commit during the season?', required: false },
+    ],
+  },
+  league: {
+    name: 'League-wide writer',
+    questions: [
+      { text: 'What would you pitch in your first two weeks, and why would readers care?', required: true },
+      { text: 'Which beats, teams or clubs do you know best?', required: false },
+    ],
+  },
+  entertainment: {
+    name: 'Entertainment writer',
+    questions: [
+      { text: 'Which show or franchise deserves more attention than it is getting, and why?', required: true },
+      { text: 'How do you keep up with news across the streaming services?', required: false },
+    ],
+  },
+};
 
 const ROLES = [
   {
@@ -16,11 +43,7 @@ const ROLES = [
     site: 'Arrowhead Addict',
     description:
       'Arrowhead Addict covers the Chiefs every day of the year, from training camp reports to film breakdowns and draft coverage. We are adding a contributor who can turn out two or three sharp articles a week during the season.\n\nYou will pitch your own angles, work with an editor on headlines and structure, and be paid per article plus traffic bonuses.',
-    questions: [
-      { text: 'Which Chiefs storyline are you following most closely this season, and why?', required: true },
-      { text: 'Link your best piece of game analysis and tell us what you are proud of.', required: false },
-      { text: 'How many hours a week can you commit during the season?', required: false },
-    ],
+    questionnaire: 'team',
   },
   {
     title: 'Los Angeles Lakers contributor',
@@ -28,10 +51,7 @@ const ROLES = [
     site: 'Lake Show Life',
     description:
       'Lake Show Life is looking for a Lakers writer who can balance quick news reaction with deeper pieces on lineups, trades and the salary cap. Evening game coverage is a regular part of the job.\n\nThis is a freelance position with room to grow into a lead writer role.',
-    questions: [
-      { text: 'Pitch us one Lakers story idea for this week.', required: true },
-      { text: 'What is the most underrated part of the Lakers roster right now?', required: false },
-    ],
+    questionnaire: 'team',
   },
   {
     title: 'New York Yankees contributor',
@@ -40,10 +60,7 @@ const ROLES = [
     site: 'Yanks Go Yard',
     description:
       'Yanks Go Yard needs a writer who knows the Bronx beat inside out. You will cover games, prospects and the offseason, and help us stand out with original analysis rather than recaps.\n\nWe are happy to hear from newer writers with a strong baseball eye.',
-    questions: [
-      { text: 'What would you write about the Yankees bullpen this month?', required: true },
-      { text: 'Which prospect should fans be watching, and what makes you say so?', required: true },
-    ],
+    questionnaire: 'team',
   },
   {
     title: 'SEC football writer',
@@ -51,10 +68,7 @@ const ROLES = [
     site: 'Saturday Blitz',
     description:
       'Saturday Blitz covers college football every week of the fall, with a focus on the SEC. We want a writer who can preview and review big games, track the recruiting cycle and write rankings people argue about.\n\nWeekend availability is essential.',
-    questions: [
-      { text: 'Which SEC program is most misjudged in the current rankings?', required: true },
-      { text: 'Tell us about any recruiting coverage you have done.', required: false },
-    ],
+    questionnaire: 'league',
   },
   {
     title: 'Premier League writer',
@@ -63,10 +77,7 @@ const ROLES = [
     site: 'Playing for 90',
     description:
       'Playing for 90 is a Premier League site for fans who want tactics and context, not just scorelines. We are hiring a writer to cover match days, transfer news and the title and relegation races.\n\nEarly weekend mornings are part of the schedule, so a UK or European time zone helps.',
-    questions: [
-      { text: 'How would you cover a transfer window for readers who follow one club?', required: true },
-      { text: 'Which clubs do you know best?', required: false },
-    ],
+    questionnaire: 'league',
   },
   {
     title: 'TV and streaming writer',
@@ -74,12 +85,12 @@ const ROLES = [
     site: 'Hidden Remote',
     description:
       'Hidden Remote covers television and streaming: renewals, cancellations, premiere dates and the shows people are talking about. We are looking for a writer who can spot a story early and write it clearly.\n\nYou will work with an editor to plan a weekly schedule of news and features.',
-    questions: [
-      { text: 'Which show deserves more attention than it is getting, and why?', required: true },
-      { text: 'How do you keep up with TV news across the streaming services?', required: false },
-    ],
+    questionnaire: 'entertainment',
   },
 ];
+
+// Each role carries its questionnaire's questions too (the sample candidates answered them).
+for (const r of ROLES) r.questions = QUESTIONNAIRES[r.questionnaire].questions;
 
 // [name, role index, stage NAME in that role's workflow, heard from, source tag, days since applied, days in current stage]
 const PEOPLE = [
@@ -122,11 +133,28 @@ const ANSWERS = [
     'My piece on third-down play calling last season, which got picked up by a few local podcasts.',
     'Ten to twelve, more in game weeks.',
   ],
-  ['A look at how the second unit holds up when the starters sit, with minutes data from the last month.', 'The backup centre. He rarely makes highlights but the lineups are better with him.'],
-  ['The bullpen has been used in a very different way this month. I would chart rest days against results.', 'A young infielder in Double-A who has quietly cut his strikeouts in half.'],
-  ['One of the mid-table programs. The rankings lean too heavily on last year.', 'I ran recruiting notes for a small site for two seasons.'],
-  ['I would follow one club per week and keep a running list of what is rumour and what is reported.', 'Mostly the top six, plus a soft spot for the promoted sides.'],
-  ['A comedy that was cancelled after two seasons and still has a loyal audience.', 'Trade newsletters, official press pages and a few reliable accounts.'],
+  [
+    'How the second unit holds up when the starters sit. I would pull minutes data from the last month.',
+    'A breakdown of the Lakers closing lineups, with the numbers behind each one.',
+    'Around eight, more on game nights.',
+  ],
+  [
+    'The bullpen has been used in a very different way this month. I would chart rest days against results.',
+    'A piece on a Double-A infielder who has quietly cut his strikeouts in half.',
+    'Ten or so, and I can do evenings.',
+  ],
+  [
+    'Which mid-table programs the rankings misjudge. A weekly list with the reasons would travel well.',
+    'The SEC and a little of the Big 12. I ran recruiting notes for a small site for two seasons.',
+  ],
+  [
+    'A running list of what is rumour and what is reported in the transfer window, one club per week.',
+    'Mostly the top six, plus a soft spot for the promoted sides.',
+  ],
+  [
+    'A comedy that was cancelled after two seasons and still has a loyal audience.',
+    'Trade newsletters, official press pages and a few reliable accounts.',
+  ],
 ];
 
 function samplePeople(now) {
@@ -171,11 +199,22 @@ async function loadSample(db, actorId, nowMs = Date.now()) {
   const nowIso = new Date(nowMs).toISOString();
   const people = samplePeople(nowMs);
   const stmts = [];
-  for (const r of ROLES) {
+  // The shared questionnaires first. A questionnaire that already exists under the same name (made by an admin) is
+  // used as it is and never marked as sample data, so removing the sample data cannot touch it.
+  for (const q of Object.values(QUESTIONNAIRES)) {
     stmts.push({
-      sql: `INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, is_sample, created_at, updated_at)
-            SELECT ?, ?, ?, ?, 'open', ?, ?, 1, ?, ? ${stmts.length === 0 ? "WHERE NOT EXISTS (SELECT 1 FROM job_roles WHERE is_sample = 1) AND NOT EXISTS (SELECT 1 FROM people WHERE is_sample = 1)" : ''}`,
-      args: [r.title, r.vertical, r.site, r.description, actorId, JSON.stringify(r.questions), nowIso, nowIso],
+      sql: 'INSERT INTO questionnaires (name, questions_json, is_sample, created_at, updated_at) SELECT ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM questionnaires WHERE name = ? COLLATE NOCASE)',
+      args: [q.name, serialise(q.questions), nowIso, nowIso, q.name],
+    });
+  }
+  for (const r of ROLES) {
+    const qName = QUESTIONNAIRES[r.questionnaire].name;
+    stmts.push({
+      sql: `INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, questionnaire_id, is_sample, created_at, updated_at)
+            SELECT ?, ?, ?, ?, 'open', ?,
+                   COALESCE((SELECT questions_json FROM questionnaires WHERE name = ? COLLATE NOCASE), '[]'),
+                   (SELECT id FROM questionnaires WHERE name = ? COLLATE NOCASE), 1, ?, ? ${stmts.length === Object.keys(QUESTIONNAIRES).length ? "WHERE NOT EXISTS (SELECT 1 FROM job_roles WHERE is_sample = 1) AND NOT EXISTS (SELECT 1 FROM people WHERE is_sample = 1)" : ''}`,
+      args: [r.title, r.vertical, r.site, r.description, actorId, qName, qName, nowIso, nowIso],
     });
   }
   // Each sample role gets its workflow (two of them differ from the default so the demo shows the feature).
@@ -276,6 +315,10 @@ async function removeSample(db) {
               AND NOT EXISTS (SELECT 1 FROM emails_sent m WHERE m.role_id = job_roles.id)`,
     },
     { sql: "UPDATE job_roles SET status = 'closed', is_sample = 0 WHERE is_sample = 1" },
+    // Sample questionnaires go with the sample roles, unless a role (a kept sample role, or a real one an admin pointed
+    // at it) still uses them: those are kept and become ordinary questionnaires.
+    { sql: 'DELETE FROM questionnaires WHERE is_sample = 1 AND NOT EXISTS (SELECT 1 FROM job_roles r WHERE r.questionnaire_id = questionnaires.id)' },
+    { sql: 'UPDATE questionnaires SET is_sample = 0 WHERE is_sample = 1' },
   ]);
 }
 

@@ -145,7 +145,7 @@ describe(`[${driver}] QA fixes`, () => {
     const c = t.client();
     await c.get(`/roles/${r}`);
     const staleQv = /name="qv" value="([0-9a-f]+)"/.exec(c.lastHtml)[1];
-    await t.db.run('UPDATE job_roles SET questions_json = ? WHERE id = ?', [JSON.stringify([{ text: 'New Q1', required: true }]), r]);
+    await t.db.run('UPDATE questionnaires SET questions_json = ? WHERE id = (SELECT questionnaire_id FROM job_roles WHERE id = ?)', [JSON.stringify([{ text: 'New Q1', required: true }]), r]);
     const before = await count(t.db, 'applications');
     const res = await c.apply(r, { name: 'Kept Name', email: 'qv@example.com', answer_0: 'answer to old Q1', qv: staleQv });
     assert.equal(res.status, 409);

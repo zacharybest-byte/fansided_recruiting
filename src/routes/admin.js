@@ -12,29 +12,8 @@ const { idParam } = require('./dashboard');
 const { rateKey } = require('../lib/ratelimit');
 const { loadSample, removeSample, sampleCounts, ROLES, PEOPLE_COUNT } = require('../lib/sample');
 const wf = require('../lib/stages');
-
-const MAX_QUESTIONS = 5;
-
-function fieldError(errors, name) {
-  return errors[name] ? html`<p class="error" id="err-${name}">${errors[name]}</p>` : '';
-}
-
-// One labelled field with optional help text and inline error; `control(attrs)` renders the input.
-function field(errors, name, label, { help = '', required = false, id = `f-${name}` } = {}, control) {
-  const describedBy = [help ? `help-${name}` : '', errors[name] ? `err-${name}` : ''].filter(Boolean).join(' ');
-  const attrs = raw(`id="${id}"${describedBy ? ` aria-describedby="${describedBy}"` : ''}${errors[name] ? ' aria-invalid="true"' : ''}`);
-  return html`<div class="field${errors[name] ? ' has-error' : ''}">
-    <label for="${id}">${label}${required ? html` <span class="req" aria-hidden="true">*</span><span class="visually-hidden"> (required)</span>` : ''}</label>
-    ${help ? html`<p class="help" id="help-${name}">${help}</p>` : ''}
-    ${control(attrs)}
-    ${fieldError(errors, name)}
-  </div>`;
-}
-
-// Error summary for a form that has per-field errors. `ids` maps a field name to the element id when it is not f-<name>.
-function summaryFor(errors, ids = {}) {
-  return errorSummary(Object.keys(errors).map((k) => ({ id: ids[k] || `f-${k}`, text: errors[k] })));
-}
+const qn = require('../lib/questionnaires');
+const { fieldError, field, summaryFor, questionList } = require('../lib/forms');
 
 // ---------- Templates ----------
 
@@ -110,8 +89,8 @@ async function getTemplate(db, id) {
 
 async function rolesPage(ctx) {
   const roles = await ctx.app.db.all(
-    `SELECT r.*, u.name AS rep_name, u.email AS rep_email, (SELECT COUNT(*) FROM applications a WHERE a.role_id = r.id) AS n
-       FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id ORDER BY r.status = 'closed', r.vertical COLLATE NOCASE, r.title COLLATE NOCASE`
+    `SELECT r.*, u.name AS rep_name, u.email AS rep_email, qn.name AS questionnaire_name, (SELECT COUNT(*) FROM applications a WHERE a.role_id = r.id) AS n
+       FROM job_roles r LEFT JOIN users u ON u.id = r.assigned_user_id LEFT JOIN questionnaires qn ON qn.id = r.questionnaire_id ORDER BY r.status = 'closed', r.vertical COLLATE NOCASE, r.title COLLATE NOCASE`
   );
   page(ctx, {
     title: 'Roles',
@@ -121,10 +100,11 @@ async function rolesPage(ctx) {
       </div>
       ${roles.length === 0
         ? html`<div class="empty"><h2>No roles yet</h2><p>Create a role to open applications for it.</p><p><a class="btn btn-primary" href="/app/admin/roles/new">Create the first role</a></p></div>`
-        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th>Questionnaire</th><th class="num">Candidates</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
         ${roles.map(
           (r) => html`<tr><td><a href="/app/admin/roles/${r.id}"><strong>${r.title}</strong></a></td><td>${r.vertical}</td><td>${r.site_name}</td>
             <td><span class="status status-${r.status}">${r.status === 'open' ? 'Open' : 'Closed'}</span></td><td>${r.rep_name || r.rep_email || html`<span class="muted">Unassigned</span>`}</td>
+            <td>${r.questionnaire_name ? html`<a href="/app/admin/questionnaires/${r.questionnaire_id}">${r.questionnaire_name}</a>` : html`<span class="muted">None</span>`}</td>
             <td class="num"><a href="/app/roles/${r.id}">${r.n}</a></td>
             <td><div class="row-actions"><a href="/app/admin/roles/${r.id}">Edit</a><a href="/app/admin/roles/new?copy=${r.id}">Duplicate<span class="visually-hidden"> ${r.title}</span></a></div></td></tr>`
         )}
@@ -280,8 +260,8 @@ async function roleForm(ctx, r, { errors = {}, status = 200, notice = '' } = {})
   const isNew = !r.id;
   const verticals = await db.all("SELECT DISTINCT vertical FROM job_roles WHERE vertical != '' ORDER BY vertical COLLATE NOCASE");
   const users = await db.all('SELECT id, name, email, active FROM users ORDER BY name COLLATE NOCASE, email');
-  const questions = [...(r.questions || [])];
-  while (questions.length < MAX_QUESTIONS) questions.push({ text: '', required: false });
+  const questionnaires = await qn.listAll(db);
+  const chosen = questionnaires.find((q) => q.id === r.questionnaire_id) || null;
   // Workflow: the role's own stages when editing, the default (or a copied) list when new.
   const stages = isNew ? [] : await wf.roleStages(db, r.id);
   const counts = new Map();
@@ -295,7 +275,7 @@ async function roleForm(ctx, r, { errors = {}, status = 200, notice = '' } = {})
         <div><h1>${isNew ? 'New role' : `Edit ${r.title}`}</h1></div>
         ${isNew ? '' : html`<div class="page-actions">${r.status === 'open' ? html`<a class="btn btn-secondary" href="/roles/${r.id}">View public page</a>` : ''}<a class="btn btn-secondary" href="/app/roles/${r.id}">Open pipeline</a></div>`}
       </div>
-      ${summaryFor(errors, { questions: 'f-q0', workflow: 'f-stage-name-0', ...Object.fromEntries(slots.map((_, i) => [`stage_${i}`, `f-stage-name-${i}`])) })}
+      ${summaryFor(errors, { workflow: 'f-stage-name-0', ...Object.fromEntries(slots.map((_, i) => [`stage_${i}`, `f-stage-name-${i}`])) })}
       ${notice ? html`<p class="flash flash-ok" id="copy-notice">${notice}</p>` : ''}
       <form method="post" action="${isNew ? '/app/admin/roles' : `/app/admin/roles/${r.id}`}" class="stack-form">
         ${csrfField(ctx)}
@@ -326,16 +306,17 @@ async function roleForm(ctx, r, { errors = {}, status = 200, notice = '' } = {})
           </div>
         </fieldset>
         ${workflowSection(errors, slots, stages, counts)}
-        <fieldset class="form-section">
+        <fieldset class="form-section" id="questionnaire">
           <legend>Questionnaire</legend>
-          <p class="help">Up to ${MAX_QUESTIONS} questions applicants answer. Leave a row blank to skip it.${isNew ? '' : ' Editing questions does not change answers already submitted.'}</p>
-          ${questions.map(
-            (q, i) => html`<div class="question-row">
-              <div class="field"><label for="f-q${i}">Question ${i + 1}</label><input type="text" id="f-q${i}" name="q_text_${i}" maxlength="500" value="${q.text}"></div>
-              <label class="check"><input type="checkbox" name="q_required_${i}" value="1"${q.required ? raw(' checked') : ''}> Required</label>
-            </div>`
-          )}
-          ${fieldError(errors, 'questions')}
+          ${field(errors, 'questionnaire_id', 'Questionnaire', { help: 'The questions applicants answer. Questionnaires are shared: change one and every role that uses it changes with it. Past answers are never altered.' }, (a) => html`<select ${a} name="questionnaire_id">
+            <option value="">None (no questions)</option>
+            ${questionnaires.map((q) => html`<option value="${q.id}"${q.id === r.questionnaire_id ? raw(' selected') : ''}>${q.name} (${wf.countWord(q.questions.length, 'question')})</option>`)}
+          </select>`)}
+          ${chosen
+            ? html`<div class="qn-preview" id="qn-preview"><h3>Questions on this role</h3>${questionList(chosen.questions)}
+                ${isNew ? '' : html`<p class="muted">Saved selection. Save the role to apply a different questionnaire.</p>`}</div>`
+            : html`<p class="muted" id="qn-preview">No questionnaire: the application form has no Questions section.</p>`}
+          <p class="qn-links">${chosen ? html`<a href="/app/admin/questionnaires/${chosen.id}">Edit this questionnaire</a>` : ''}<a href="/app/admin/questionnaires">Manage questionnaires</a></p>
         </fieldset>
         <div class="form-actions"><button type="submit" class="btn btn-primary">Save role</button><a class="btn btn-secondary" href="/app/admin/roles">Cancel</a></div>
       </form>`,
@@ -351,13 +332,13 @@ function readRole(ctx) {
     description: f.get('description').replace(/\r\n/g, '\n').trim(),
     status: f.get('status') === 'closed' ? 'closed' : 'open',
     assigned_user_id: f.get('assigned_user_id') ? Number(f.get('assigned_user_id')) : null,
-    questions: [],
+    questionnaire_id: null,
   };
   const errors = {};
-  for (let i = 0; i < MAX_QUESTIONS; i++) {
-    const text = f.get(`q_text_${i}`).replace(/[\r\n]+/g, ' ').trim();
-    if (text) r.questions.push({ text, required: f.get(`q_required_${i}`) === '1' });
-    if (text.length > 500) errors.questions = 'Questions must be at most 500 characters.';
+  const qid = f.get('questionnaire_id').trim();
+  if (qid) {
+    if (/^[1-9]\d{0,15}$/.test(qid)) r.questionnaire_id = Number(qid);
+    else errors.questionnaire_id = 'That questionnaire is not available. Pick one from the list, or choose None.';
   }
   if (!r.title || r.title.length > 200) errors.title = 'Title is required (up to 200 characters).';
   if (!r.vertical || r.vertical.length > 100) errors.vertical = 'Vertical is required (up to 100 characters).';
@@ -369,9 +350,22 @@ function readRole(ctx) {
 async function getRole(db, id) {
   const r = await db.get('SELECT * FROM job_roles WHERE id = ?', [idParam(id)]);
   if (!r) throw new HttpError(404, 'Role not found');
-  r.questions = JSON.parse(r.questions_json || '[]');
   return r;
 }
+
+// The chosen questionnaire must exist (the save itself is guarded again in SQL).
+async function checkQuestionnaire(db, r, errors) {
+  if (r.questionnaire_id === null || errors.questionnaire_id) return;
+  if (!(await db.get('SELECT id FROM questionnaires WHERE id = ?', [r.questionnaire_id]))) {
+    errors.questionnaire_id = 'That questionnaire no longer exists. Pick another one, or choose None.';
+  }
+}
+
+// SQL for the role's questionnaire columns: the id, and the legacy questions_json as a verbatim copy of the questionnaire's
+// (so a rollback to the previous version still shows the right questions). Guard first: the questionnaire must still exist.
+const QUESTIONNAIRE_GUARD = (id) => qn.abortIf('? IS NOT NULL AND NOT EXISTS (SELECT 1 FROM questionnaires WHERE id = ?)', [id, id]);
+const LEGACY_COPY = "COALESCE((SELECT questions_json FROM questionnaires WHERE id = ?), '[]')";
+const GUARD_MESSAGE = 'The questionnaire you picked was deleted while you were saving. Nothing was saved: pick another one, or choose None.';
 
 async function checkAssignee(db, r, errors, previousId) {
   if (r.assigned_user_id === null) return;
@@ -623,15 +617,10 @@ function register(router) {
     const { db } = ctx.app;
     const copyId = ctx.query.get('copy') || '';
     const source = /^[1-9]\d{0,15}$/.test(copyId) ? await db.get('SELECT * FROM job_roles WHERE id = ?', [Number(copyId)]) : null;
-    if (!source) return roleForm(ctx, { status: 'open', assigned_user_id: ctx.user.id, questions: [] });
+    if (!source) return roleForm(ctx, { status: 'open', assigned_user_id: ctx.user.id, questionnaire_id: null });
     const stages = await wf.roleStages(db, source.id);
     const rep = source.assigned_user_id ? await db.get('SELECT id FROM users WHERE id = ? AND active = 1', [source.assigned_user_id]) : null;
-    let questions = [];
-    try {
-      questions = JSON.parse(source.questions_json || '[]');
-    } catch {
-      questions = [];
-    }
+    const sourceQ = source.questionnaire_id ? await db.get('SELECT id FROM questionnaires WHERE id = ?', [source.questionnaire_id]) : null;
     return roleForm(
       ctx,
       {
@@ -641,10 +630,10 @@ function register(router) {
         description: source.description,
         status: 'closed',
         assigned_user_id: rep ? rep.id : null,
-        questions,
+        questionnaire_id: sourceQ ? sourceQ.id : null,
         progressNames: stages.filter((s) => s.kind === 'progress').map((s) => s.name),
       },
-      { notice: `You are copying "${source.title}": its description, questions, workflow and rep are filled in. Candidates are not copied. The copy starts as Closed so it is not published by accident. Nothing is created until you save.` }
+      { notice: `You are copying "${source.title}": its description, questionnaire, workflow and rep are filled in. Candidates are not copied. The copy starts as Closed so it is not published by accident. Nothing is created until you save.` }
     );
   });
   router.post('/app/admin/roles', ...AP, async (ctx) => {
@@ -653,19 +642,27 @@ function register(router) {
     const w = readWorkflow(ctx.form, null);
     Object.assign(errors, w.errors);
     await checkAssignee(db, r, errors, null);
+    await checkQuestionnaire(db, r, errors);
     if (Object.keys(errors).length) return roleForm(ctx, { ...r, slots: w.present ? w.slots : undefined }, { errors, status: 400 });
     const now = nowIso();
     const progress = w.present ? w.keep.map((k) => k.name) : wf.DEFAULT_PROGRESS;
     // The role and its stages are one atomic batch: a role never exists without its workflow.
-    const results = await db.batch([
-      {
-        sql: 'INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        args: [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, now],
-      },
-      ...wf.insertStagesAfterRole(progress, now),
-    ]);
+    let results;
+    try {
+      results = await db.batch([
+        QUESTIONNAIRE_GUARD(r.questionnaire_id),
+        {
+          sql: `INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, questionnaire_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ${LEGACY_COPY}, ?, ?, ?)`,
+          args: [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, r.questionnaire_id, r.questionnaire_id, now, now],
+        },
+        ...wf.insertStagesAfterRole(progress, now),
+      ]);
+    } catch (err) {
+      if (!qn.isGuardFailure(err)) throw err;
+      return roleForm(ctx, { ...r, slots: w.present ? w.slots : undefined }, { errors: { questionnaire_id: GUARD_MESSAGE }, status: 409 });
+    }
     setFlash(ctx, 'ok', 'Role created.');
-    ctx.redirect(`/app/admin/roles/${results[0].lastInsertRowid}`);
+    ctx.redirect(`/app/admin/roles/${results[1].lastInsertRowid}`);
   });
   router.get('/app/admin/roles/:id', ...A, async (ctx) => roleForm(ctx, await getRole(ctx.app.db, ctx.params.id)));
   router.post('/app/admin/roles/:id', ...AP, async (ctx) => {
@@ -678,15 +675,16 @@ function register(router) {
     const w = readWorkflow(ctx.form, stages, counts);
     Object.assign(errors, w.errors);
     await checkAssignee(db, r, errors, existing.assigned_user_id);
+    await checkQuestionnaire(db, r, errors);
     if (Object.keys(errors).length) return roleForm(ctx, { ...r, id: existing.id, slots: w.present ? w.slots : undefined }, { errors, status: 400 });
     const now = nowIso();
     const roleUpdate = {
-      sql: 'UPDATE job_roles SET title = ?, vertical = ?, site_name = ?, description = ?, status = ?, assigned_user_id = ?, questions_json = ?, updated_at = ? WHERE id = ?',
-      args: [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, JSON.stringify(r.questions), now, existing.id],
+      sql: `UPDATE job_roles SET title = ?, vertical = ?, site_name = ?, description = ?, status = ?, assigned_user_id = ?, questions_json = ${LEGACY_COPY}, questionnaire_id = ?, updated_at = ? WHERE id = ?`,
+      args: [r.title, r.vertical, r.site_name, r.description, r.status, r.assigned_user_id, r.questionnaire_id, r.questionnaire_id, now, existing.id],
     };
     // Role fields and workflow are ONE batch. The guards come first: if the set of stages changed, or a stage being
     // removed has gained a candidate, since the form was read, the batch aborts and nothing at all is saved.
-    const statements = [roleUpdate];
+    const statements = [QUESTIONNAIRE_GUARD(r.questionnaire_id), roleUpdate];
     if (w.present) {
       const ws = workflowStatements(existing.id, stages, w, now);
       statements.unshift(...ws.guards);
@@ -695,6 +693,7 @@ function register(router) {
     try {
       await db.batch(statements);
     } catch (err) {
+      if (qn.isGuardFailure(err)) return roleForm(ctx, { ...r, id: existing.id, slots: w.slots }, { errors: { questionnaire_id: GUARD_MESSAGE }, status: 409 });
       if (!wf.isGuardFailure(err)) throw err;
       return roleForm(
         ctx,

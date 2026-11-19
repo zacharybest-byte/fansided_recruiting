@@ -47,20 +47,27 @@ function parseCsv(text) {
   return rows;
 }
 
-test('AC-29: admin creates a role with 5 questions, edits it and closes it; closed roles leave / but stay internal', async () => {
+test('AC-29: admin creates a questionnaire with 5 questions, a role that uses it, edits the role and closes it; closed roles leave / but stay internal', async () => {
+  await admin.get('/app/admin/questionnaires/new');
+  const qFields = { name: 'Packers questions' };
+  for (let i = 0; i < 5; i++) qFields[`q_text_${i}`] = `Question ${i + 1}?`;
+  qFields.q_required_0 = '1';
+  qFields.q_required_3 = '1';
+  qFields.q_text_5 = 'A sixth question is ignored';
+  assert.equal((await admin.post('/app/admin/questionnaires', qFields)).status, 303);
+  const questionnaire = await t.db.get("SELECT * FROM questionnaires WHERE name = 'Packers questions'");
+  const qs = JSON.parse(questionnaire.questions_json);
+  assert.equal(qs.length, 5);
+  assert.deepEqual(qs.map((q) => q.required), [true, false, false, true, false]);
+
   await admin.get('/app/admin/roles/new');
   const repId = (await t.db.get("SELECT id FROM users WHERE email = 'rep@fansided.com'")).id;
-  const fields = { title: 'Packers Writer', vertical: 'NFL', site_name: 'Lombardi Ave', description: 'Line 1\nLine 2', status: 'open', assigned_user_id: String(repId) };
-  for (let i = 0; i < 5; i++) fields[`q_text_${i}`] = `Question ${i + 1}?`;
-  fields.q_required_0 = '1';
-  fields.q_required_3 = '1';
-  fields.q_text_5 = 'A sixth question is ignored';
+  const fields = { title: 'Packers Writer', vertical: 'NFL', site_name: 'Lombardi Ave', description: 'Line 1\nLine 2', status: 'open', assigned_user_id: String(repId), questionnaire_id: String(questionnaire.id) };
   let res = await admin.post('/app/admin/roles', fields);
   assert.equal(res.status, 303);
   const role = await t.db.get("SELECT * FROM job_roles WHERE title = 'Packers Writer'");
-  const qs = JSON.parse(role.questions_json);
-  assert.equal(qs.length, 5);
-  assert.deepEqual(qs.map((q) => q.required), [true, false, false, true, false]);
+  assert.equal(role.questionnaire_id, questionnaire.id);
+  assert.equal(role.questions_json, questionnaire.questions_json, 'legacy copy kept for a rollback');
   assert.equal(role.description, 'Line 1\nLine 2');
   const pub = await t.client().get(`/roles/${role.id}`);
   assert.match(pub.text, /Question 5\?/);
@@ -73,11 +80,11 @@ test('AC-29: admin creates a role with 5 questions, edits it and closes it; clos
 
   await t.client().apply(role.id, { email: 'packer@example.com', name: 'Pat Packer', answer_0: 'a', answer_3: 'b' });
 
-  res = await admin.post(`/app/admin/roles/${role.id}`, { ...fields, title: 'Packers Staff Writer', q_text_4: '' });
+  res = await admin.post(`/app/admin/roles/${role.id}`, { ...fields, title: 'Packers Staff Writer' });
   assert.equal(res.status, 303);
   let edited = await t.db.get('SELECT * FROM job_roles WHERE id = ?', [role.id]);
   assert.equal(edited.title, 'Packers Staff Writer');
-  assert.equal(JSON.parse(edited.questions_json).length, 4);
+  assert.equal(JSON.parse(edited.questions_json).length, 5);
 
   assert.match((await t.client().get('/')).text, /Packers Staff Writer/);
   await admin.get(`/app/admin/roles/${role.id}`);

@@ -102,9 +102,9 @@ describe('AC-41: Vercel entry', () => {
     assert.deepEqual(fs.readdirSync(path.join(ROOT, 'public')).filter((f) => f !== 'fonts').sort(), ['app.js', 'favicon.svg', 'logo.png', 'style.css']);
   });
 
-  test('package.json: 2.2.0, node 22.x, no dependencies, scripts start/dev/test only', () => {
+  test('package.json: 2.3.0, node 22.x, no dependencies, scripts start/dev/test only', () => {
     const pkg = JSON.parse(read('package.json'));
-    assert.equal(pkg.version, '2.2.0');
+    assert.equal(pkg.version, "2.3.0");
     assert.equal(pkg.engines.node, '22.x');
     assert.equal(pkg.main, 'api/index.js');
     assert.equal(pkg.dependencies, undefined);

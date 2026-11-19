@@ -2,7 +2,7 @@
 // v2.2.0: per-role workflows (stages) and copying a role. Every test runs on both drivers.
 const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { DRIVERS, startApp, makeUser, makeRole, lastApplication, count, stageId, moveStage } = require('./helpers');
+const { DRIVERS, startApp, makeUser, makeRole, makeQuestionnaire, lastApplication, count, stageId, moveStage } = require('./helpers');
 
 const XSS = '<script>alert(1)</script>';
 const XSS_ESCAPED = '&lt;script&gt;alert\\(1\\)&lt;\\/script&gt;'; // for use inside RegExp source
@@ -567,8 +567,9 @@ for (const driver of DRIVERS) describe(`[${driver}] workflows`, () => {
 
   // ---------------------------------------------------------------- copying a role
   test('Duplicate: the roles list links to the pre-filled form; nothing is created until saved', async () => {
+    const qid = await makeQuestionnaire(t.db, { name: 'Original questions', questions: [{ text: 'Why us?', required: true }, { text: 'Optional one', required: false }] });
     const src = await createRole('Original role', ['Reviewing', 'Edit test', 'Trial'], {
-      site_name: 'Arrowhead <b>Addict</b>', description: 'Line one\nLine two', q_text_0: 'Why us?', q_required_0: '1', q_text_1: 'Optional one', q_text_2: 'Third?', q_required_2: '1',
+      site_name: 'Arrowhead <b>Addict</b>', description: 'Line one\nLine two', questionnaire_id: String(qid),
     });
     const list = await admin.get('/app/admin/roles');
     assert.match(list.text, new RegExp(`<a href="/app/admin/roles/new\\?copy=${src}">Duplicate<span class="visually-hidden"> Original role</span></a>`));
@@ -584,11 +585,8 @@ for (const driver of DRIVERS) describe(`[${driver}] workflows`, () => {
     assert.match(form.text, /<option value="closed" selected>Closed<\/option>/);
     assert.doesNotMatch(form.text, /<option value="open" selected>/);
     assert.match(form.text, new RegExp(`<option value="${repId}" selected>Rita Rep</option>`));
-    assert.match(form.text, /name="q_text_0"[^>]*value="Why us\?"/);
-    assert.match(form.text, /name="q_required_0" value="1" checked/);
-    assert.match(form.text, /name="q_text_1"[^>]*value="Optional one"/);
-    assert.doesNotMatch(form.text, /name="q_required_1" value="1" checked/);
-    assert.match(form.text, /name="q_required_2" value="1" checked/);
+    assert.match(form.text, new RegExp(`<option value="${qid}" selected>Original questions \\(2 questions\\)</option>`), 'the same questionnaire is selected');
+    assert.match(form.text, /Why us\?/); // and previewed
     assert.match(form.text, /name="stage_name_0"[^>]*value="Reviewing"/);
     assert.match(form.text, /name="stage_name_1"[^>]*value="Edit test"/);
     assert.match(form.text, /name="stage_name_2"[^>]*value="Trial"/);
@@ -600,18 +598,20 @@ for (const driver of DRIVERS) describe(`[${driver}] workflows`, () => {
   });
 
   test('Duplicate: saving creates an independent role with the copied questions and workflow; candidates and the source are untouched', async () => {
-    const src = await createRole('Source role', ['Phone screen', 'Trial'], { q_text_0: 'Why us?', q_required_0: '1', q_text_1: 'And?' });
+    const qid = await makeQuestionnaire(t.db, { name: 'Source questions', questions: [{ text: 'Why us?', required: true }, { text: 'And?', required: false }] });
+    const src = await createRole('Source role', ['Phone screen', 'Trial'], { questionnaire_id: String(qid) });
     assert.equal((await t.client().apply(src, { email: email(), name: 'Stays Here', answer_0: 'because' })).status, 303);
     const srcStages = await stagesOf(src);
     const form = await admin.get(`/app/admin/roles/new?copy=${src}`);
     assert.equal(form.status, 200);
     const res = await admin.post('/app/admin/roles', {
-      title: 'Copy of Source role', vertical: 'NFL', status: 'closed', assigned_user_id: String(repId), q_text_0: 'Why us?', q_required_0: '1', q_text_1: 'And?',
+      title: 'Copy of Source role', vertical: 'NFL', status: 'closed', assigned_user_id: String(repId), questionnaire_id: String(qid),
       stage_slots: '1', stage_name_0: 'Phone screen', stage_pos_0: '1', stage_name_1: 'Trial', stage_pos_1: '2',
     });
     assert.equal(res.status, 303);
     const copy = await t.db.get("SELECT * FROM job_roles WHERE title = 'Copy of Source role'");
     assert.equal(copy.status, 'closed');
+    assert.equal(copy.questionnaire_id, qid, 'the copy shares the same questionnaire');
     assert.deepEqual(JSON.parse(copy.questions_json), [{ text: 'Why us?', required: true }, { text: 'And?', required: false }]);
     assert.deepEqual(await names(copy.id), ['New', 'Phone screen', 'Trial', 'Onboarded', 'Passed']);
     assert.equal(await count(t.db, 'applications', 'role_id = ?', copy.id), 0, 'candidates are not copied');

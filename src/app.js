@@ -7,6 +7,7 @@ const path = require('node:path');
 const { loadConfig, ConfigError } = require('./lib/config');
 const { openDb, migrate } = require('./lib/db');
 const { repair: repairWorkflows } = require('./lib/stages');
+const { repair: repairQuestionnaires } = require('./lib/questionnaires');
 const { createContext, Router, HttpError, clientIp, securityHeaders } = require('./lib/http');
 const { loadSession, requireAdmin } = require('./lib/auth');
 const { errorPage } = require('./lib/layout');
@@ -87,6 +88,7 @@ function createApp(options = {}) {
   require('./routes/dashboard').register(router);
   require('./routes/candidates').register(router);
   require('./routes/admin').register(router);
+  require('./routes/questionnaires').register(router);
   const staticFiles = loadStatic();
 
   // Init runs once per instance (migrations, dummy password hash); a failure is retried on the next request.
@@ -97,6 +99,8 @@ function createApp(options = {}) {
         await migrate(db);
         // Idempotent: a no-op unless an older deployment wrote a role or application without its workflow rows.
         await repairWorkflows(db);
+        // Idempotent: a no-op unless an older deployment wrote role questions after the questionnaire migration.
+        await repairQuestionnaires(db);
         await dummyHash();
       })().catch((err) => {
         initPromise = null;

@@ -10,6 +10,7 @@ const { rateKey, reserve, reserveStatements, reservedGuard, pruneStatement } = r
 const { SAMPLE_DOMAIN } = require('../lib/sample');
 const { normaliseEmail } = require('../lib/auth');
 const { notifyNewApplication } = require('../lib/notify');
+const qn = require('../lib/questionnaires');
 
 const LIMITS = { name: 200, email: 254, linkedin: 2000, resume: 2000, links: 2000, answer: 5000, source: 100 };
 const RATE_LIMIT = 10; // stored applications / honeypot hits per IP
@@ -30,16 +31,18 @@ function cleanSource(value) {
   return String(value || '').trim().slice(0, LIMITS.source);
 }
 
-// Short fingerprint of a role's questionnaire. The form carries it so answers are never
-// matched to questions that changed while the applicant was typing.
+// Short fingerprint of the questions the role shows (those of its questionnaire). The form carries it so answers are never
+// matched to questions that changed while the applicant was typing: the questionnaire edited, or swapped for another
+// one, or removed from the role.
 function questionsVersion(role) {
-  return crypto.createHash('sha256').update(role.questions_json || '[]').digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(qn.serialise(role.questions)).digest('hex').slice(0, 16);
 }
 
 async function getRole(db, id) {
   if (!/^[1-9]\d*$/.test(String(id)) || !Number.isSafeInteger(Number(id))) return null;
-  const role = await db.get('SELECT * FROM job_roles WHERE id = ?', [Number(id)]);
-  if (role) role.questions = JSON.parse(role.questions_json || '[]');
+  // The questions come from the role's questionnaire; job_roles.questions_json is legacy storage and is not read.
+  const role = await db.get('SELECT r.*, q.questions_json AS questionnaire_json FROM job_roles r LEFT JOIN questionnaires q ON q.id = r.questionnaire_id WHERE r.id = ?', [Number(id)]);
+  if (role) role.questions = qn.parseQuestions(role.questionnaire_json);
   return role;
 }
 

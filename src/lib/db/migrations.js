@@ -182,6 +182,7 @@ const MIGRATIONS = [
     },
   },
   { version: 3, name: 'per-role workflows (role_stages, applications.stage_id, backfill, triggers)', statements: () => workflowMigration() },
+  { version: 4, name: 'questionnaires (questionnaires table, job_roles.questionnaire_id, backfill)', statements: () => questionnaireMigration() },
 ];
 
 
@@ -245,6 +246,54 @@ function workflowMigration() {
     `CREATE TRIGGER applications_stage_id_on_stage AFTER UPDATE OF stage ON applications
   WHEN NEW.stage_id IS OLD.stage_id AND NEW.stage IS NOT OLD.stage
   BEGIN UPDATE applications SET stage_id = ${STAGE_ID_FROM_LEGACY} WHERE id = NEW.id; END`,
+  ];
+}
+
+// Migration 4 (v2.3.0): questionnaire templates. ADDITIVE ONLY: one new table, one new nullable column, two indexes, a
+// backfill and a tripwire. Nothing existing is rebuilt, dropped or renamed; job_roles.questions_json is left exactly as
+// it is (legacy storage that the app keeps writing a copy into, so a rollback still shows the right questions).
+// Every role whose questions_json is a NON-EMPTY JSON ARRAY gets its own questionnaire, "<title> questions", holding a
+// verbatim copy of that JSON, and is pointed at it. Roles without questions keep questionnaire_id NULL.
+// "Non-empty array" is decided in SQL without JSON functions: after trimming it starts with '[' and with spaces, tabs
+// and line breaks removed it is not '[]' (so '', '[]', '[ ]', ' [\n] ' are all "no questions").
+function questionnaireMigration() {
+  const now = nowIso();
+  const { nonEmptyArray, backfillName } = require('../questionnaires');
+  const hasQuestions = (c) => nonEmptyArray(c);
+  return [
+    `CREATE TABLE questionnaires (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    questions_json TEXT NOT NULL DEFAULT '[]',
+    is_sample INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+    // Names are unique, case-insensitively (also guards two admins saving the same name at once).
+    'CREATE UNIQUE INDEX questionnaires_name_nocase ON questionnaires(name COLLATE NOCASE)',
+    'ALTER TABLE job_roles ADD COLUMN questionnaire_id INTEGER',
+    'CREATE INDEX job_roles_questionnaire ON job_roles(questionnaire_id)',
+    {
+      sql: `INSERT INTO questionnaires (name, questions_json, is_sample, created_at, updated_at)
+            SELECT ${backfillName('r')}, r.questions_json, 0, ?, ?
+              FROM job_roles r WHERE ${hasQuestions('r.questions_json')} ORDER BY r.id`,
+      args: [now, now],
+    },
+    `UPDATE job_roles SET questionnaire_id = (SELECT q.id FROM questionnaires q WHERE q.name = ${backfillName('job_roles')})
+      WHERE ${hasQuestions('questions_json')}`,
+    // Tripwire: if any role with questions is not pointing at a questionnaire holding exactly its questions, or a role
+    // without questions got one, or the counts differ, this INSERT violates NOT NULL, the whole batch (table, column,
+    // backfill, tracking row) rolls back and start-up fails loudly. It can never insert a row.
+    {
+      sql: `INSERT INTO questionnaires (name, questions_json, created_at, updated_at)
+            SELECT NULL, '[]', ?, ?
+             WHERE EXISTS (SELECT 1 FROM job_roles r WHERE ${hasQuestions('r.questions_json')}
+                             AND (r.questionnaire_id IS NULL OR NOT EXISTS (SELECT 1 FROM questionnaires q WHERE q.id = r.questionnaire_id AND q.questions_json = r.questions_json)))
+                OR EXISTS (SELECT 1 FROM job_roles r WHERE NOT ${hasQuestions('r.questions_json')} AND r.questionnaire_id IS NOT NULL)
+                OR (SELECT COUNT(*) FROM questionnaires) != (SELECT COUNT(*) FROM job_roles r WHERE ${hasQuestions('r.questions_json')})
+                OR (SELECT COUNT(DISTINCT questionnaire_id) FROM job_roles) != (SELECT COUNT(*) FROM questionnaires)`,
+      args: [now, now],
+    },
   ];
 }
 

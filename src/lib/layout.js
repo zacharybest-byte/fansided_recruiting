@@ -42,6 +42,7 @@ function navActive(path) {
   if (path.startsWith('/app/candidates') || path.startsWith('/app/applications')) return '/app/candidates';
   if (path.startsWith('/app/export')) return '/app/export';
   if (path.startsWith('/app/admin/roles')) return '/app/admin/roles';
+  if (path.startsWith('/app/admin/questionnaires')) return '/app/admin/questionnaires';
   if (path.startsWith('/app/admin/templates')) return '/app/admin/templates';
   if (path.startsWith('/app/admin/users')) return '/app/admin/users';
   if (path.startsWith('/app/admin/sample')) return '/app/admin/sample';
@@ -57,7 +58,8 @@ const NAV_LABELS = {
   '/app/candidates': 'Candidates',
   '/app/export': 'Export',
   '/app/admin/roles': 'Roles',
-  '/app/admin/templates': 'Templates',
+  '/app/admin/questionnaires': 'Questionnaires',
+  '/app/admin/templates': 'Email templates',
   '/app/admin/users': 'Users',
   '/app/admin/sample': 'Sample data',
 };
@@ -67,20 +69,33 @@ const NAV_LABELS = {
 const logoImg = html`<img class="logo" src="/public/logo.png" width="368" height="96" alt="FanSided">`;
 const wordmark = (href, tag, extra = '') => html`<a href="${href}" class="wordmark${extra}">${logoImg}${tag ? html`<span class="wordmark-tag">${tag}</span>` : ''}</a>`;
 
-// The links, in one place, for both the desktop bar and the small-screen menu.
-function navLinks(active, isAdmin) {
+// The links, in one place, for both the desktop bar and the small-screen menu. The admin "Manage" links are a group
+// in the small-screen menu and a no-JavaScript <details> dropdown in the bar (eight links no longer fit beside the user name).
+const MANAGE_LINKS = [
+  ['/app/admin/roles', 'Roles'],
+  ['/app/admin/questionnaires', 'Questionnaires'],
+  ['/app/admin/templates', 'Email templates'],
+  ['/app/admin/users', 'Users'],
+  ['/app/admin/sample', 'Sample data'],
+];
+
+function navLinks(active, isAdmin, { dropdown = false } = {}) {
+  const manage = MANAGE_LINKS.map(([href, label]) => navLink(active, href, label));
+  const inManage = MANAGE_LINKS.some(([href]) => href === active);
   return html`${navLink(active, '/app', 'Dashboard')}
       ${navLink(active, '/app/candidates', 'Candidates')}
       ${navLink(active, '/app/export', 'Export')}
-      ${isAdmin
-        ? html`<div class="nav-group" role="group" aria-label="Manage">
-            <span class="nav-label">Manage</span>
-            ${navLink(active, '/app/admin/roles', 'Roles')}
-            ${navLink(active, '/app/admin/templates', 'Templates')}
-            ${navLink(active, '/app/admin/users', 'Users')}
-            ${navLink(active, '/app/admin/sample', 'Sample data')}
-          </div>`
-        : ''}`;
+      ${!isAdmin
+        ? ''
+        : dropdown
+          ? html`<details class="nav-manage${inManage ? ' is-current' : ''}">
+              <summary>Manage</summary>
+              <div class="nav-manage-list">${manage}</div>
+            </details>`
+          : html`<div class="nav-group" role="group" aria-label="Manage">
+              <span class="nav-label">Manage</span>
+              ${manage}
+            </div>`}`;
 }
 
 function internalMasthead(ctx, user) {
@@ -94,7 +109,7 @@ function internalMasthead(ctx, user) {
   <div class="masthead-inner">
     ${wordmark('/app', 'Recruit')}
     <nav class="nav nav-bar" aria-label="Main">
-      ${navLinks(active, isAdmin)}
+      ${navLinks(active, isAdmin, { dropdown: true })}
     </nav>
     <details class="nav-menu">
       <summary><span class="nav-menu-label">Menu</span>${current ? html`<span class="nav-menu-current">${current}</span>` : ''}</summary>

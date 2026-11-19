@@ -165,15 +165,15 @@ test('AC-08: answers are snapshotted with question text; editing questions later
     { question: 'Why this team?', answer: 'Because Bears' },
     { question: 'Anything else?', answer: '' },
   ]);
-  await t.db.run('UPDATE job_roles SET questions_json = ? WHERE id = ?', [JSON.stringify([{ text: 'Totally new question', required: true }]), qRole]);
+  const qnId = (await t.db.get('SELECT questionnaire_id AS id FROM job_roles WHERE id = ?', [qRole])).id;
+  await t.db.run('UPDATE questionnaires SET questions_json = ? WHERE id = ?', [JSON.stringify([{ text: 'Totally new question', required: true }]), qnId]);
   const admin = t.client();
   await admin.login('admin@fansided.com');
   const page = await admin.get(`/app/applications/${app.id}`);
   assert.match(page.text, /Why this team\?/);
   assert.match(page.text, /Because Bears/);
   assert.doesNotMatch(page.text, /Totally new question/);
-  await t.db.run('UPDATE job_roles SET questions_json = ? WHERE id = ?', [JSON.stringify([{ text: 'Why this team?', required: true }, { text: 'Anything else?', required: false }]),
-    qRole]);
+  await t.db.run('UPDATE questionnaires SET questions_json = ? WHERE id = ?', [JSON.stringify([{ text: 'Why this team?', required: true }, { text: 'Anything else?', required: false }]), qnId]);
 });
 
 test('AC-53: LinkedIn, resume and sample links must be https; http, javascript: and data: are field errors; bare hosts get https://', async () => {

@@ -9,6 +9,9 @@ const { MIGRATIONS, migrate, openDb } = require('../src/lib/db');
 const { currentVersion } = require('../src/lib/db/migrations');
 const stages = require('../src/lib/stages');
 
+// These tests are about migration 3 only: they stop there (migration 4 has its own file, migration-questionnaires.test.js).
+const migrate3 = (db) => migrate(db, { upTo: 3 });
+
 const T0 = '2026-10-01T12:00:00.000Z';
 const FIVE = ['New', 'Reviewing', 'Trial', 'Onboarded', 'Passed'];
 const LEGACY_TO_NAME = { new: 'New', reviewing: 'Reviewing', trial: 'Trial', onboarded: 'Onboarded', passed: 'Passed' };
@@ -70,8 +73,8 @@ function secondConnection(driver, handle) {
 
 for (const driver of DRIVERS) {
   describe(`migration 3: per-role workflows [${driver}]`, () => {
-    test('migration 3 exists and is last; the schema it starts from is the current one (versions 1 and 2)', async () => {
-      assert.deepEqual(MIGRATIONS.map((m) => m.version), [1, 2, 3]);
+    test('migration 3 exists; the schema it starts from is the current one (versions 1 and 2)', async () => {
+      assert.deepEqual(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4]);
       const h = await freshDb(driver, { upTo: 2 });
       try {
         assert.equal(await currentVersion(h.db), 2);
@@ -89,7 +92,7 @@ for (const driver of DRIVERS) {
         const before = await snapshot(h.db);
         assert.equal(before.applications.length, 15);
 
-        const res = await migrate(h.db);
+        const res = await migrate3(h.db);
         assert.deepEqual(res, { from: 2, to: 3 });
         assert.equal(await currentVersion(h.db), 3);
 
@@ -132,11 +135,11 @@ for (const driver of DRIVERS) {
       const h = await freshDb(driver, { upTo: 2 });
       try {
         await seedLegacy(h.db);
-        await migrate(h.db);
+        await migrate3(h.db);
         const once = { stages: await h.db.all('SELECT * FROM role_stages ORDER BY id'), apps: await h.db.all('SELECT id, stage, stage_id FROM applications ORDER BY id'), mig: await h.db.all('SELECT * FROM schema_migrations ORDER BY version') };
-        assert.deepEqual(await migrate(h.db), { from: 3, to: 3 });
+        assert.deepEqual(await migrate3(h.db), { from: 3, to: 3 });
         assert.deepEqual(await stages.repair(h.db), { roles: 0, applications: 0 });
-        assert.deepEqual(await migrate(h.db), { from: 3, to: 3 });
+        assert.deepEqual(await migrate3(h.db), { from: 3, to: 3 });
         assert.deepEqual(await stages.repair(h.db), { roles: 0, applications: 0 });
         assert.deepEqual(await h.db.all('SELECT * FROM role_stages ORDER BY id'), once.stages);
         assert.deepEqual(await h.db.all('SELECT id, stage, stage_id FROM applications ORDER BY id'), once.apps);
@@ -149,7 +152,7 @@ for (const driver of DRIVERS) {
     test('an empty database (no roles, no applications) migrates too', async () => {
       const h = await freshDb(driver, { upTo: 2 });
       try {
-        await migrate(h.db);
+        await migrate3(h.db);
         assert.equal((await h.db.get('SELECT COUNT(*) AS n FROM role_stages')).n, 0);
         assert.ok((await columnsOf(h.db, 'applications')).includes('stage_id'));
       } finally {
@@ -172,7 +175,7 @@ for (const driver of DRIVERS) {
         assert.equal(await currentVersion(h.db), 2);
         assert.deepEqual(await snapshot(h.db), before);
         // and the real migration still runs afterwards
-        assert.deepEqual(await migrate(h.db), { from: 2, to: 3 });
+        assert.deepEqual(await migrate3(h.db), { from: 2, to: 3 });
       } finally {
         await h.close();
       }
@@ -194,7 +197,7 @@ for (const driver of DRIVERS) {
         const broken = MIGRATIONS[2].statements;
         MIGRATIONS[2].statements = () => withoutBackfill;
         try {
-          await assert.rejects(migrate(h.db));
+          await assert.rejects(migrate3(h.db));
         } finally {
           MIGRATIONS[2].statements = broken;
         }
@@ -209,7 +212,7 @@ for (const driver of DRIVERS) {
       const second = secondConnection(driver, h);
       try {
         const seed = await seedLegacy(h.db);
-        const results = await Promise.all([migrate(h.db), migrate(second), migrate(h.db)]);
+        const results = await Promise.all([migrate3(h.db), migrate3(second), migrate3(h.db)]);
         assert.ok(results.every((r) => r.to === 3));
         assert.equal(await currentVersion(h.db), 3);
         assert.equal((await h.db.get('SELECT COUNT(*) AS n FROM role_stages')).n, seed.roles.length * 5, 'no duplicated stages');
@@ -228,7 +231,7 @@ for (const driver of DRIVERS) {
         const seed = await seedLegacy(h.db);
         await makeUser(h.db, { email: 'admin@fansided.com', role: 'admin' });
         t = await startApp({ driver, dataDir: h.dir, fake: h.fake, ownFake: false });
-        assert.equal(await currentVersion(t.db), 3);
+        assert.equal(await currentVersion(t.db), 4); // the app runs every migration
         const c = t.client();
         await c.login('admin@fansided.com');
         const dash = await c.get('/app?view=all');
@@ -259,7 +262,7 @@ for (const driver of DRIVERS) {
       const h = await freshDb(driver, { upTo: 2 });
       try {
         const seed = await seedLegacy(h.db);
-        await migrate(h.db);
+        await migrate3(h.db);
         const [roleA, roleB] = seed.roles;
         const idOf = async (role, name) => (await h.db.get('SELECT id FROM role_stages WHERE role_id = ? AND name = ?', [role, name])).id;
         // old code inserts an application knowing only the legacy column

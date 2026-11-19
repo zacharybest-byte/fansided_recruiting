@@ -355,6 +355,17 @@ Workflows and copying roles (2.2.0). Tested on both drivers in `test/workflow.te
 - **AC-70** Candidates tab (`test/candidates-filters.test.js`, both drivers): default owner is me and status active for reps and admins; `owner=all`; admin `owner=<id>` and `none`; a rep passing another id/none/junk gets their own list; every status value, default hides passed, unknown values fall back; chip counts follow owner and search; q, sort and page combine and every link keeps the other parameters; columns, stacked-card markup, Clear filters, empty states; XSS in q/owner/status/sort and in user names; signed-out redirect.
 - **AC-71** Application history: panel under the stepper with summary line, newest first, outcome badge and date, rep and last actor, note counts, collapsed notes (also rendered for print), "Open this application" links; escaped role titles and note text; no panel and the quiet line for a first-time applicant; no other person's applications; sample data gives two people a history; the long email wraps at the @.
 
+## 10b. Questionnaire templates (2.3.0)
+
+Questionnaires are reusable named question lists (`questionnaires` table, `questions_json`), selected per role via `job_roles.questionnaire_id`
+(none allowed). Screens (admin only, reps get 403): `/app/admin/questionnaires` (list: name, question count, "Used by N roles" with linked
+titles, Edit / Duplicate / Delete), `/new` (and `?copy=<id>` pre-filled as "Copy of ..."), `/:id` (notice "Used by N roles. Changes apply to all of
+them straight away." when in use), `/:id/delete` (refused while any role uses it). Role form: Questionnaire select (None + all, with counts), a
+read-only preview of the saved selection, links "Edit this questionnaire" / "Manage questionnaires"; Duplicate role keeps the questionnaire; an
+unknown id is an inline error. Roles list shows the questionnaire. Public apply form and the `qv` fingerprint use the questionnaire's questions;
+answers snapshot the question text. `job_roles.questions_json` is legacy storage, written as a copy for rollback, repaired at start-up (see NOTES 2.3.0).
+Migration 4 is additive with a tripwire. Tests: `test/questionnaires.test.js`, `test/migration-questionnaires.test.js` (both drivers).
+
 ## 11. Not in v2 (later)
 
 Resume file upload, Google sign-in, sending mail from the app, self-service "forgot password" email, Gemini

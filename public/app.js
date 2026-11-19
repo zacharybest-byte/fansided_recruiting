@@ -15,6 +15,21 @@
     }
   }
 
+  // The Manage dropdown is a <details> (works without JavaScript): also close it on Escape or a click elsewhere.
+  var manage = document.querySelector('details.nav-manage');
+  if (manage) {
+    document.addEventListener('click', function (e) {
+      if (manage.open && !manage.contains(e.target)) manage.open = false;
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && manage.open) {
+        manage.open = false;
+        var summary = manage.querySelector('summary');
+        if (summary) summary.focus();
+      }
+    });
+  }
+
   // Show the Voltax fields only when the picked stage is the role's Onboarded stage (its option has data-kind).
   document.querySelectorAll('.voltax-fields[data-show-for]').forEach(function (box) {
     var form = box.closest('form');
