@@ -1,22 +1,32 @@
 'use strict';
 // Page shell, flash messages and small shared view helpers.
 const { html } = require('./render');
+const { hmacHex, safeEqual } = require('./crypto');
 const { formatDateTime, formatDate } = require('./time');
 
 const STAGES = ['new', 'reviewing', 'trial', 'onboarded', 'passed'];
 const STAGE_LABELS = { new: 'New', reviewing: 'Reviewing', trial: 'Trial', onboarded: 'Onboarded', passed: 'Passed' };
 const HEARD_FROM = ['LinkedIn', 'Indeed', 'X/Twitter', 'FanSided site', 'Referral', 'Other'];
 
+// The flash cookie is signed (base64url(JSON).HMAC-SHA256 under SESSION_SECRET): anything unsigned or altered is ignored,
+// so a cookie set from a sibling subdomain or by script cannot put text on a page.
+function flashMac(ctx, payload) {
+  return hmacHex(ctx.app.config.secret, `flash:${payload}`);
+}
+
 function setFlash(ctx, type, message) {
-  ctx.setCookie('flash', JSON.stringify({ type, message }), { maxAge: 60, httpOnly: true, secure: true });
+  const payload = Buffer.from(JSON.stringify({ type, message }), 'utf8').toString('base64url');
+  ctx.setCookie('flash', `${payload}.${flashMac(ctx, payload)}`, { maxAge: 60, httpOnly: true, secure: true });
 }
 
 function takeFlash(ctx) {
   const raw = ctx.cookies.flash;
   if (!raw) return null;
   ctx.clearCookie('flash');
+  const m = /^([A-Za-z0-9_-]+)\.([0-9a-f]{64})$/.exec(raw);
+  if (!m || !safeEqual(m[2], flashMac(ctx, m[1]))) return null;
   try {
-    const f = JSON.parse(raw);
+    const f = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8'));
     return { type: f.type === 'error' ? 'error' : 'ok', message: String(f.message || '') };
   } catch {
     return null;

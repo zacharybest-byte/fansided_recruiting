@@ -13,19 +13,19 @@
 // - Not verified against a real Turso database (no network in the build sandbox), only against test/fake-turso.js.
 const { normaliseStatement, normaliseBatch } = require('./common');
 
-const TIMEOUT_MS = 10000;
+const TIMEOUT_MS = 8000;
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 
-// libsql://host -> https://host. http:// is accepted for localhost / 127.0.0.1 only (the test fake).
+// libsql://host and turso://host -> https://host. http:// is accepted for localhost / 127.0.0.1 only (the test fake).
 function pipelineUrl(rawUrl) {
   let u;
   try {
-    u = new URL(String(rawUrl).trim().replace(/^libsql:\/\//i, 'https://'));
+    u = new URL(String(rawUrl).trim().replace(/^(?:libsql|turso):\/\//i, 'https://'));
   } catch {
     throw new Error('TURSO_DATABASE_URL is not a valid URL');
   }
   if (u.protocol === 'http:' && !LOCAL_HOSTS.has(u.hostname)) throw new Error('TURSO_DATABASE_URL must use https:// (http:// is only allowed for localhost)');
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('TURSO_DATABASE_URL must start with libsql:// or https://');
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('TURSO_DATABASE_URL must start with libsql://, turso:// or https://');
   if (u.username || u.password) throw new Error('TURSO_DATABASE_URL must not contain credentials; use TURSO_AUTH_TOKEN');
   return `${u.origin}${u.pathname.replace(/\/+$/, '')}/v2/pipeline`;
 }
@@ -162,4 +162,4 @@ function createTursoDb({ url, token, fetchImpl, timeoutMs = TIMEOUT_MS }) {
   return db;
 }
 
-module.exports = { createTursoDb, pipelineUrl };
+module.exports = { createTursoDb, pipelineUrl, TIMEOUT_MS };

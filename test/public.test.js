@@ -120,7 +120,7 @@ test('AC-06: valid submission creates one New application with one system stage_
   const before = await count(t.db, 'applications');
   const res = await c.apply(openNfl, { name: 'Valid Person', email: 'valid@example.com' });
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/thanks');
+  assert.equal(res.headers.get('location'), '/thanks#top');
   assert.equal(await count(t.db, 'applications'), before + 1);
   const app = await lastApplication(t.db);
   assert.equal(app.stage, 'new');
@@ -141,7 +141,8 @@ test('AC-07: same email in different case gives one person and two applications'
   await c.apply(openNfl, { name: 'Dee Dupe-Two', email: '  dupe.person@example.COM ' });
   const people = await t.db.all("SELECT * FROM people WHERE email = 'dupe.person@example.com'");
   assert.equal(people.length, 1);
-  assert.equal(people[0].name, 'Dee Dupe-Two'); // latest application wins
+  assert.equal(people[0].name, 'Dee Dupe'); // F-05: the first saved name stays
+  assert.deepEqual((await t.db.all('SELECT applicant_name FROM applications WHERE person_id = ? ORDER BY id', [people[0].id])).map((r) => r.applicant_name), ['Dee Dupe', 'Dee Dupe-Two']);
   assert.equal(await count(t.db, 'applications', 'person_id = ?', people[0].id), 2);
 });
 
@@ -252,7 +253,7 @@ test('AC-11: honeypot shows thanks and stores nothing; 11th submission from one 
   const peopleBefore = await count(t.db, 'people');
   const res = await c.apply(openNfl, { email: 'bot@example.com', website: 'http://spam.example.com' });
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/thanks');
+  assert.equal(res.headers.get('location'), '/thanks#top');
   assert.equal(await count(t.db, 'applications'), before);
   assert.equal(await count(t.db, 'people'), peopleBefore);
 

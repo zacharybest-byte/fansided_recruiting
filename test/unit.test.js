@@ -9,9 +9,9 @@ const { hashPassword, verifyPassword, validatePassword, dummyHash } = require('.
 const { formatDateTime, zonedMidnightUtc, isValidYmd } = require('../src/lib/time');
 const { applyMergeFields, firstName } = require('../src/lib/email');
 const { parseCookies, serializeCookie } = require('../src/lib/cookies');
-const { loadConfig, resolveBaseUrl, ConfigError } = require('../src/lib/config');
+const { loadConfig, resolveBaseUrl, ConfigError, DEV_SECRET } = require('../src/lib/config');
 const { notifyNewApplication } = require('../src/lib/notify');
-const { reserve, release } = require('../src/lib/ratelimit');
+const { reserve, release, clearGroupStatement } = require('../src/lib/ratelimit');
 const { rateKey, allowed, record, RETENTION_MS } = require('../src/lib/ratelimit');
 const { freshDb } = require('./helpers');
 const voltax = require('../src/voltax');
@@ -85,10 +85,21 @@ test('config: reads exactly the documented variables; production rules; webhook 
   assert.notEqual(ignored.dataDir, '/nonexistent');
   assert.equal(ignored.adminEmail, '');
   // setup variables
-  assert.equal(loadConfig({ ADMIN_EMAIL: ' Boss@FanSided.com ', SETUP_TOKEN: 'x'.repeat(20) }).adminEmail, 'boss@fansided.com');
-  const short = loadConfig({ ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: 'x'.repeat(19) });
-  assert.equal(short.setupToken, '');
-  assert.ok(short.warnings.some((w) => /SETUP_TOKEN/.test(w)));
+  const GOOD_TOKEN = 'Qm3-Zx8Lp2Wv7Kd9Rs4Nb1Tc6Yh5Gf0Ja2Uo';
+  assert.equal(loadConfig({ ADMIN_EMAIL: ' Boss@FanSided.com ', SETUP_TOKEN: GOOD_TOKEN }).adminEmail, 'boss@fansided.com');
+  assert.equal(loadConfig({ ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: `  ${GOOD_TOKEN}\n` }).setupToken, GOOD_TOKEN, 'trimmed');
+  // F-08/F-10: SETUP_TOKEN needs 32+ characters and 10+ distinct ones; SESSION_SECRET 32+ and 16+ distinct, after trimming.
+  for (const weak of ['x'.repeat(31), 'x'.repeat(64), 'abcdefghi'.repeat(5), `${'q'.repeat(30)}  `]) {
+    const short = loadConfig({ ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: weak });
+    assert.equal(short.setupToken, '', weak);
+    assert.ok(short.warnings.some((w) => /SETUP_TOKEN/.test(w)));
+  }
+  assert.equal(loadConfig({ SETUP_TOKEN: 'abcdefghij'.repeat(4) }).setupToken, 'abcdefghij'.repeat(4), '10 distinct characters are enough');
+  const dev0 = loadConfig({ SESSION_SECRET: 'ab'.repeat(40) });
+  assert.equal(dev0.secret, DEV_SECRET);
+  assert.ok(dev0.warnings.some((w) => /distinct/.test(w)));
+  assert.equal(loadConfig({ SESSION_SECRET: `  ${'abcdefghijklmnop'.repeat(2)}  ` }).secret, 'abcdefghijklmnop'.repeat(2), 'trimmed');
+  assert.throws(() => loadConfig({ NODE_ENV: 'production', SESSION_SECRET: 'abcdefghijklmno'.repeat(4), TURSO_DATABASE_URL: 'libsql://a.turso.io', TURSO_AUTH_TOKEN: 't' }), (e) => e.missing.join() === 'SESSION_SECRET'); // 15 distinct
   // webhook must be https
   assert.equal(loadConfig({ NOTIFY_WEBHOOK_URL: 'https://hooks.example.com/x?k=v' }).webhookUrl, 'https://hooks.example.com/x?k=v');
   for (const bad of ['http://hooks.example.com/x', 'ftp://x', 'nonsense', 'javascript:alert(1)']) {
@@ -98,7 +109,7 @@ test('config: reads exactly the documented variables; production rules; webhook 
     assert.ok(!c.warnings.join().includes(bad), 'the URL itself is not logged');
   }
   // base URL: BASE_URL, else VERCEL_PROJECT_PRODUCTION_URL, else VERCEL_URL, else the request host (not in production)
-  const prod = { NODE_ENV: 'production', SESSION_SECRET: 'x'.repeat(32), TURSO_DATABASE_URL: 'libsql://a.turso.io', TURSO_AUTH_TOKEN: 't' };
+  const prod = { NODE_ENV: 'production', SESSION_SECRET: 'abcdefghijklmnopqrstuvwxyz012345', TURSO_DATABASE_URL: 'libsql://a.turso.io', TURSO_AUTH_TOKEN: 't' };
   assert.equal(loadConfig({ ...prod, BASE_URL: 'https://recruit.example.com/', VERCEL_URL: 'v.vercel.app' }).baseUrl, 'https://recruit.example.com');
   assert.equal(loadConfig({ ...prod, VERCEL_PROJECT_PRODUCTION_URL: 'recruit.vercel.app', VERCEL_URL: 'v-abc.vercel.app' }).baseUrl, 'https://recruit.vercel.app');
   assert.equal(loadConfig({ ...prod, VERCEL_URL: 'v-abc.vercel.app' }).baseUrl, 'https://v-abc.vercel.app');
@@ -213,17 +224,25 @@ test('rate limiter reserve(): the guarded INSERT lets only `limit` of a parallel
     const results = await Promise.all(Array.from({ length: 12 }, () => reserve(f.db, [spec])));
     assert.equal(results.filter((r) => r.ok).length, 5);
     assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 5);
-    const two = await reserve(f.db, [{ ...spec, limit: 100 }, { key: rateKey('s3cret', 'login-ip', '1.2.3.4'), limit: 1, windowMs: 900000 }, { key: rateKey('s3cret', 'login-ip', '1.2.3.4'), limit: 1, windowMs: 900000 }]);
-    assert.equal(two.ok, false, 'one refused key makes the whole reservation not ok');
-    // Ordered: a spec is only recorded when the specs before it were (so an IP over its limit adds no email keys).
+    // F-01: all or nothing. When one of the specs is full, NONE of them is recorded.
     await f.db.run('DELETE FROM rate_limits');
     const ipKey = rateKey('s3cret', 'login-ip', '1.2.3.4');
+    const other = { key: rateKey('s3cret', 'login-pair', 'a@b.example|1.2.3.4'), limit: 5, windowMs: 900000 };
     await reserve(f.db, [{ key: ipKey, limit: 1, windowMs: 900000 }]);
-    await new Promise((r) => setTimeout(r, 3)); // distinct milliseconds, so the test is deterministic
-    const blocked = await reserve(f.db, [{ key: ipKey, limit: 1, windowMs: 900000 }, spec]);
+    const blocked = await reserve(f.db, [other, { key: ipKey, limit: 1, windowMs: 900000 }, spec]);
     assert.equal(blocked.ok, false);
     assert.deepEqual(blocked.keys, []);
-    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits WHERE key = ?', [key])).n, 0);
+    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 1, 'only the first reservation exists');
+    // The same holds when the full bucket is not the first one.
+    const blocked2 = await reserve(f.db, [spec, other, { key: ipKey, limit: 1, windowMs: 900000 }]);
+    assert.equal(blocked2.ok, false);
+    assert.equal((await f.db.get('SELECT COUNT(*) AS n FROM rate_limits')).n, 1);
+    // Several specs that all have room are all recorded (their own rows never count against each other), with a group.
+    const ok3 = await reserve(f.db, [{ ...other, group: 'g1' }, { ...spec, limit: 1, group: 'g1' }]);
+    assert.equal(ok3.ok, true);
+    assert.equal((await f.db.get("SELECT COUNT(*) AS n FROM rate_limits WHERE grp = 'g1'")).n, 2);
+    await f.db.batch([clearGroupStatement('g1')]);
+    assert.equal((await f.db.get("SELECT COUNT(*) AS n FROM rate_limits WHERE grp = 'g1'")).n, 0);
     await f.db.run('DELETE FROM rate_limits');
     const r = await reserve(f.db, [spec]);
     assert.equal(r.ok, true);

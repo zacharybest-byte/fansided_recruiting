@@ -6,7 +6,8 @@ const { page, HEARD_FROM } = require('../lib/layout');
 const { readForm } = require('../lib/http');
 const { publicField, verifyPublic } = require('../lib/csrf');
 const { nowIso } = require('../lib/db');
-const { rateKey, allowed, recordStatements } = require('../lib/ratelimit');
+const { rateKey, reserve, reserveStatements, reservedGuard, pruneStatement } = require('../lib/ratelimit');
+const { SAMPLE_DOMAIN } = require('../lib/sample');
 const { normaliseEmail } = require('../lib/auth');
 const { notifyNewApplication } = require('../lib/notify');
 
@@ -34,7 +35,7 @@ function questionsVersion(role) {
 }
 
 async function getRole(db, id) {
-  if (!/^\d+$/.test(String(id)) || !Number.isSafeInteger(Number(id))) return null;
+  if (!/^[1-9]\d*$/.test(String(id)) || !Number.isSafeInteger(Number(id))) return null;
   const role = await db.get('SELECT * FROM job_roles WHERE id = ?', [Number(id)]);
   if (role) role.questions = JSON.parse(role.questions_json || '[]');
   return role;
@@ -157,6 +158,17 @@ function normaliseUrl(value) {
   return null;
 }
 
+// A plain address: one @, a local part of letters, digits and . _ + - (no leading, trailing or doubled dot), and a
+// dotted domain with a letters-only last label. Everything that could change a mailto: or URL (? & = % / # quotes
+// angle brackets , ; whitespace) is refused. The reserved sample domain is refused so applicants can never attach to
+// sample data.
+function validEmail(email) {
+  const e = String(email).toLowerCase();
+  if (e.length > LIMITS.email || e.includes('..')) return false;
+  if (!/^[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$/.test(e)) return false;
+  return !e.endsWith(`@${SAMPLE_DOMAIN}`);
+}
+
 function validate(form, role) {
   const errors = {};
   const values = {
@@ -174,8 +186,7 @@ function validate(form, role) {
   else if (values.name.length > LIMITS.name) errors.name = `Name must be at most ${LIMITS.name} characters.`;
 
   if (!values.email) errors.email = 'Please enter your email address.';
-  else if (values.email.length > LIMITS.email || !/^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/.test(values.email))
-    errors.email = 'Please enter a valid email address.';
+  else if (!validEmail(values.email)) errors.email = 'Please enter a valid email address.';
 
   let linkedin = '';
   if (values.linkedin_url) {
@@ -224,22 +235,17 @@ async function applySubmit(ctx) {
   const role = await getRole(db, ctx.params.id);
   if (!role || role.status !== 'open') return closedPage(ctx);
 
-  const limitKey = rateKey(config.secret, 'apply', ctx.ip);
-  if (!(await allowed(db, limitKey, RATE_LIMIT, RATE_WINDOW_MS))) {
-    return page(ctx, {
-      title: 'Too many submissions',
-      status: 429,
-      body: html`<h1>Too many submissions</h1><p>You have sent too many applications in the last hour. Please try again later.</p>`,
-    });
-  }
-
   const form = await readForm(ctx.req);
   verifyPublic(ctx, form);
 
+  // The per-IP limit is reserved INSIDE the batches below (atomic with the inserts), never checked first.
+  const limitKey = rateKey(config.secret, 'apply', ctx.ip);
+  const spec = { key: limitKey, limit: RATE_LIMIT, windowMs: RATE_WINDOW_MS };
+
   // Honeypot: pretend it worked, save nothing (still counts towards the rate limit).
   if (form.get('website').trim()) {
-    await db.batch(recordStatements(limitKey));
-    return ctx.redirect('/thanks');
+    await reserve(db, [spec]);
+    return ctx.redirect('/thanks#top');
   }
 
   const { errors, values, clean } = validate(form, role);
@@ -253,21 +259,32 @@ async function applySubmit(ctx) {
   }
   if (Object.keys(errors).length) return applyFormPage(ctx, role, { values, errors, status: 400 });
 
-  // One atomic batch: person upsert, application, first event, rate-limit hit. The application and the event
-  // find their ids in SQL (the person by email, the application via last_insert_rowid()), so no read-then-write.
+  // One atomic batch. The rate-limit row is reserved first (only while the IP has fewer than RATE_LIMIT hits in the
+  // window); every later statement is conditioned on that row existing, so at most RATE_LIMIT applications are
+  // stored however many requests arrive at once. The application and the event find their ids in SQL (the person by
+  // email, the application via last_insert_rowid()), so there is no read-then-write. An existing person keeps their
+  // name and LinkedIn (filled only when empty); what was typed this time is kept on the application row.
   const now = nowIso();
+  const { at, statements: reserved } = reserveStatements([spec]);
+  const guard = reservedGuard(limitKey, at);
   const results = await db.batch([
+    reserved[0],
     {
-      sql: `INSERT INTO people (email, name, linkedin_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(email) DO UPDATE SET name = excluded.name, linkedin_url = excluded.linkedin_url, updated_at = excluded.updated_at`,
-      args: [clean.email, clean.name, clean.linkedin_url, now, now],
+      sql: `INSERT INTO people (email, name, linkedin_url, created_at, updated_at) SELECT ?, ?, ?, ?, ? WHERE ${guard.sql}
+            ON CONFLICT(email) DO UPDATE SET
+              name = CASE WHEN people.name = '' THEN excluded.name ELSE people.name END,
+              linkedin_url = CASE WHEN people.linkedin_url = '' THEN excluded.linkedin_url ELSE people.linkedin_url END,
+              updated_at = excluded.updated_at`,
+      args: [clean.email, clean.name, clean.linkedin_url, now, now, ...guard.args],
     },
     {
-      sql: `INSERT INTO applications (person_id, role_id, stage, sample_links, resume_url, answers_json,
+      sql: `INSERT INTO applications (person_id, role_id, applicant_name, applicant_linkedin, stage, sample_links, resume_url, answers_json,
               heard_from, source_tag, applied_at, stage_changed_at)
-            SELECT id, ?, 'new', ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ?`,
+            SELECT id, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ? FROM people WHERE email = ? AND ${guard.sql}`,
       args: [
         role.id,
+        clean.name,
+        clean.linkedin_url,
         clean.sample_links,
         clean.resume_url,
         JSON.stringify(clean.answers),
@@ -276,15 +293,24 @@ async function applySubmit(ctx) {
         now,
         now,
         clean.email,
+        ...guard.args,
       ],
     },
     {
-      sql: "INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (last_insert_rowid(), 'stage_change', NULL, 'new', NULL, ?)",
-      args: [now],
+      sql: `INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at)
+            SELECT last_insert_rowid(), 'stage_change', NULL, 'new', NULL, ? WHERE ${guard.sql}`,
+      args: [now, ...guard.args],
     },
-    ...recordStatements(limitKey),
+    pruneStatement(),
   ]);
-  const applicationId = results[1].lastInsertRowid;
+  if (results[0].changes !== 1) {
+    return page(ctx, {
+      title: 'Too many submissions',
+      status: 429,
+      body: html`<h1>Too many submissions</h1><p>You have sent too many applications in the last hour. Please try again later.</p>`,
+    });
+  }
+  const applicationId = results[2].lastInsertRowid;
 
   // Optional webhook after the batch has committed: role title and link only, never applicant data.
   await notifyNewApplication({
@@ -295,7 +321,8 @@ async function applySubmit(ctx) {
     applicationId,
     baseUrl: ctx.baseUrl(),
   });
-  ctx.redirect('/thanks');
+  // The form's action carries #apply, which a redirect without a fragment would inherit.
+  ctx.redirect('/thanks#top');
 }
 
 function register(router) {

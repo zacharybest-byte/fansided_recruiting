@@ -244,7 +244,7 @@ describe(`[${driver}] invites and reset links`, () => {
 });
 
 describe(`[${driver}] AC-51: first-admin setup link`, () => {
-  const SETUP_TOKEN = 'setup-token-0123456789-abcdef';
+  const SETUP_TOKEN = 'setup-token-0123456789-abcdef-QWERTYUIOP';
   const env = { ADMIN_EMAIL: 'Boss@FanSided.com', SETUP_TOKEN };
   const fields = (pw = NEW_PW, confirm = pw, token = SETUP_TOKEN) => ({ token, password: pw, password_confirm: confirm });
 
@@ -263,8 +263,8 @@ describe(`[${driver}] AC-51: first-admin setup link`, () => {
     } finally {
       await t.close();
     }
-    // Without ADMIN_EMAIL / SETUP_TOKEN (or with a SETUP_TOKEN under 20 characters) the page does not exist.
-    for (const e of [{}, { ADMIN_EMAIL: 'boss@fansided.com' }, { SETUP_TOKEN }, { ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: 'short-token' }]) {
+    // Without ADMIN_EMAIL / SETUP_TOKEN (or with a SETUP_TOKEN under 32 characters, or with fewer than 10 distinct ones) the page does not exist.
+    for (const e of [{}, { ADMIN_EMAIL: 'boss@fansided.com' }, { SETUP_TOKEN }, { ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: 'short-token' }, { ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: 'setup-token-0123456789-abcdef' }, { ADMIN_EMAIL: 'boss@fansided.com', SETUP_TOKEN: 'abab'.repeat(12) }]) {
       const x = await startApp({ driver, env: e, admin: false });
       try {
         assert.equal((await x.client().get(`/setup?token=${e.SETUP_TOKEN || SETUP_TOKEN}`)).status, 404, JSON.stringify(e));
@@ -363,12 +363,44 @@ describe(`[${driver}] AC-51: first-admin setup link`, () => {
       assert.match(limited.text, /Too many attempts/);
       assert.equal(await count(t.db, 'users'), 0);
       assert.equal((await c.post('/set-password', { token: 'x', password: NEW_PW, password_confirm: NEW_PW }, { csrf })).status, 429);
+      // F-08: the budget is taken only AFTER the CSRF check: forged POSTs from an IP use none of it.
+      const forger = t.client({ ip: '192.0.2.79' });
+      await forger.get(`/setup?token=${SETUP_TOKEN}`);
+      const realCsrf = forger.csrf();
+      for (let i = 0; i < 15; i++) assert.equal((await forger.post('/setup', fields('short', 'short'), { csrf: 'forged' })).status, 403);
+      for (let i = 0; i < 10; i++) assert.equal((await forger.post('/setup', fields('short', 'short'), { csrf: realCsrf })).status, 400, 'the honest POSTs still have their whole budget');
       // another IP is not affected; the window expires
       const other = t.client({ ip: '192.0.2.78' });
       await other.get(`/setup?token=${SETUP_TOKEN}`);
       assert.equal((await other.post('/setup', fields())).status, 303);
     } finally {
       await t.close();
+    }
+  });
+
+  test('F-08: GETs with an invalid token are limited to 30 per IP per 15 minutes; valid tokens do not count; an IP over the limit learns nothing', async () => {
+    const t = await startApp({ driver, env, admin: false });
+    try {
+      const c = t.client({ ip: '192.0.2.90' });
+      for (let i = 0; i < 40; i++) assert.equal((await c.get(`/setup?token=${SETUP_TOKEN.slice(1)}${i}`)).status, i < 30 ? 404 : 429, `guess ${i + 1}`);
+      const refused = await c.get(`/setup?token=${SETUP_TOKEN}`); // even the right token: refused before it is looked at
+      assert.equal(refused.status, 429);
+      assert.doesNotMatch(refused.text, /boss@/);
+      // /set-password shares the budget; both are DB-backed (a fresh app instance on the same DB still refuses).
+      assert.equal((await c.get(`/set-password?token=${'a'.repeat(43)}`)).status, 429);
+      const again = await t.restart();
+      try {
+        assert.equal((await again.client({ ip: '192.0.2.90' }).get(`/setup?token=${SETUP_TOKEN}`)).status, 429);
+        // Other addresses are unaffected, and valid-token GETs never use up the budget.
+        const ok = again.client({ ip: '192.0.2.91' });
+        for (let i = 0; i < 40; i++) assert.equal((await ok.get(`/setup?token=${SETUP_TOKEN}`)).status, 200, `valid ${i + 1}`);
+        assert.equal(await count(again.db, 'rate_limits'), 30);
+      } finally {
+        await again.close();
+      }
+    } catch (err) {
+      await t.close();
+      throw err;
     }
   });
 });

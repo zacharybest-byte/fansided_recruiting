@@ -10,7 +10,7 @@ const { toCsv } = require('../lib/csv');
 const { formatDateTime, zonedMidnightUtc, isValidYmd, todayIn, daysSince } = require('../lib/time');
 
 function idParam(value) {
-  if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw new HttpError(404, 'Not found');
+  if (!/^[1-9]\d*$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw new HttpError(404, 'Not found');
   return Number(value);
 }
 
@@ -35,23 +35,22 @@ async function dashboard(ctx) {
     if (!counts.has(row.role_id)) counts.set(row.role_id, {});
     counts.get(row.role_id)[row.stage] = row.n;
   }
-  // "+N since your last visit": applications that arrived after the previous dashboard view, computed from the
-  // stored stamp (nothing in memory) BEFORE the stamp is moved forward. Before a user's first visit there is no
-  // previous view, so nothing is shown.
-  const now = nowIso();
+  // "+N since your last visit": applications that arrived after the stored stamp users.dashboard_seen_at, which only
+  // the explicit "Mark as seen" POST moves (a GET never writes). Until a user has marked something as seen there is
+  // no stamp, so nothing is shown.
   const since = new Map();
   if (ctx.user.dashboard_seen_at) {
     for (const row of await db.all('SELECT role_id, COUNT(*) AS n FROM applications WHERE applied_at > ? GROUP BY role_id', [ctx.user.dashboard_seen_at])) {
       since.set(row.role_id, row.n);
     }
   }
-  await db.run('UPDATE users SET dashboard_seen_at = ? WHERE id = ?', [now, ctx.user.id]);
   page(ctx, {
     title: 'Dashboard',
     body: html`<h1>${showAll ? 'All roles' : 'My roles'}</h1>
       <p class="toolbar">
         ${showAll ? html`<a href="/app">Show my roles</a>` : html`<a href="/app?view=all">Show all roles</a>`}
         · <a href="/app/export">Export CSV</a>
+        <form method="post" action="/app/seen" class="inline">${csrfField(ctx)}${showAll ? html`<input type="hidden" name="view" value="all">` : ''}<button type="submit">Mark as seen</button></form>
       </p>
       ${roles.length === 0
         ? html`<p class="muted">${showAll ? 'No roles yet.' : 'No roles are assigned to you.'} ${showAll ? '' : html`<a href="/app?view=all">See all roles</a>.`}</p>`
@@ -73,6 +72,12 @@ async function dashboard(ctx) {
           </tbody>
         </table></div>`}`,
   });
+}
+
+// The only writer of users.dashboard_seen_at: "+N since your last visit" counts from this moment on.
+async function markSeen(ctx) {
+  await ctx.app.db.run('UPDATE users SET dashboard_seen_at = ? WHERE id = ?', [nowIso(), ctx.user.id]);
+  ctx.redirect(ctx.form.get('view') === 'all' ? '/app?view=all' : '/app');
 }
 
 async function rolePipeline(ctx) {
@@ -232,6 +237,7 @@ async function exportCsv(ctx) {
 
 function register(router) {
   router.get('/app', requireUser, dashboard);
+  router.post('/app/seen', requireUser, internalForm, markSeen);
   router.get('/app/roles/:id', requireUser, rolePipeline);
   router.post('/app/roles/:id/assign', requireUser, internalForm, reassign);
   router.get('/app/export', requireUser, exportPage);

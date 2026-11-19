@@ -89,6 +89,9 @@ async function candidatePage(ctx) {
     }
   }
   const linkedin = person.linkedin_url;
+  // The person record keeps the first name and LinkedIn; show what this application was submitted with when it differs.
+  const nameDiff = Boolean(app.applicant_name) && app.applicant_name !== person.name;
+  const linkDiff = Boolean(app.applicant_linkedin) && app.applicant_linkedin !== person.linkedin_url;
   const today = todayIn(config.timezone);
 
   page(ctx, {
@@ -96,7 +99,10 @@ async function candidatePage(ctx) {
     body: html`<p><a href="/app/roles/${app.role_id}">← ${app.role_title}</a></p>
       <header class="candidate-header">
         <h1>${person.name}</h1>
-        <p><a href="mailto:${person.email}">${person.email}</a>${linkedin ? html` · ${link(linkedin, 'LinkedIn / portfolio')}` : ''}</p>
+        <p><a href="mailto:${encodeURIComponent(person.email)}">${person.email}</a>${linkedin ? html` · ${link(linkedin, 'LinkedIn / portfolio')}` : ''}</p>
+        ${nameDiff || linkDiff
+          ? html`<p class="muted" id="submitted-as">Entered on this application:${nameDiff ? html` name <strong>${app.applicant_name}</strong>` : ''}${linkDiff ? html` link ${link(app.applicant_linkedin)}` : ''}</p>`
+          : ''}
         <p>Role: <strong>${app.role_title}</strong>${app.role_status === 'closed' ? ' (closed)' : ''}
            · Stage: <strong class="stage-badge stage-${app.stage}">${STAGE_LABELS[app.stage]}</strong>
            · Applied ${fmtDateTime(ctx, app.applied_at)}</p>
@@ -418,7 +424,7 @@ async function deleteConfirm(ctx) {
   const person = await db.get('SELECT * FROM people WHERE id = ?', [pid]);
   if (!person) throw new HttpError(404, 'Person not found');
   const apps = await db.all('SELECT a.id, r.title FROM applications a JOIN job_roles r ON r.id = a.role_id WHERE a.person_id = ?', [pid]);
-  const from = /^\d+$/.test(ctx.query.get('from') || '') ? ctx.query.get('from') : null;
+  const from = /^[1-9]\d*$/.test(ctx.query.get('from') || '') ? ctx.query.get('from') : null;
   page(ctx, {
     title: 'Delete candidate',
     body: html`<h1>Delete ${person.name}?</h1>

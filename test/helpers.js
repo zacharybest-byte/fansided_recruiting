@@ -38,7 +38,7 @@ const DRIVERS = ['sqlite', 'turso'];
 
 // Starts the app on a random port. `driver` is 'sqlite' or 'turso'. For restarts pass the same
 // `dataDir` (and `fake`, for turso), or use `t.restart()`.
-async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl, log, ownFake: ownFakeOpt, admin = true, trustedIpHeader = 'x-forwarded-for' } = {}) {
+async function startApp({ driver = 'sqlite', env = {}, dataDir, fake, fetchImpl, log, ownFake: ownFakeOpt, admin = true, trustedIpHeader = 'x-vercel-forwarded-for' } = {}) {
   const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'fsr-test-'));
   const ownFake = ownFakeOpt ?? (driver === 'turso' && !fake);
   const theFake = driver === 'turso' ? fake || (await startFakeTurso()) : null;
@@ -137,7 +137,7 @@ class Client {
       method,
       body,
       redirect: 'manual',
-      headers: { cookie: this.cookieHeader(), 'x-forwarded-for': this.ip, ...headers },
+      headers: { cookie: this.cookieHeader(), 'x-vercel-forwarded-for': this.ip, ...headers },
     });
     this.storeCookies(res);
     const buf = Buffer.from(await res.arrayBuffer());

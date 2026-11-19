@@ -7,14 +7,17 @@ const { newSession, setSessionCookie, destroySession, requireUser, safeNext, nor
 const { publicField, verifyPublic, internalForm } = require('../lib/csrf');
 const { safeEqual, sha256Hex } = require('../lib/crypto');
 const { hashPassword, verifyPassword, validatePassword, dummyHash, MIN_LENGTH, MAX_LENGTH } = require('../lib/password');
-const { rateKey, reserve, releaseStatement } = require('../lib/ratelimit');
+const { rateKey, reserve, release, releaseStatement, clearGroupStatement } = require('../lib/ratelimit');
 const { csrfField } = require('../lib/csrf');
 const { nowIso } = require('../lib/db');
 
 const WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_FAILURES_PER_EMAIL = 5;
+const HOUR_MS = 60 * 60 * 1000;
+const LOGIN_FAILURES_PER_PAIR = 5; // one email from one address: strict, so a typo-ing user is slowed down...
+const LOGIN_FAILURES_PER_EMAIL = 50; // ...but a stranger cannot lock the real user out: the per-email ceiling is loose
 const LOGIN_FAILURES_PER_IP = 20;
 const TOKEN_POSTS_PER_IP = 10;
+const TOKEN_GUESSES_PER_IP = 30; // GETs of /setup and /set-password with a token that is not valid
 const BAD_LOGIN = 'Email or password is incorrect.';
 const TOO_MANY = 'Too many attempts. Try again later.';
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
@@ -58,6 +61,23 @@ function loginPage(ctx, { error, status = 200, email = '', next } = {}) {
   });
 }
 
+// The three login buckets. `group` ties the email's rows together so an admin reset can clear them.
+function loginSpecs(secret, email, ip) {
+  const group = rateKey(secret, 'login-group', email);
+  return [
+    { key: rateKey(secret, 'login-ip', ip), limit: LOGIN_FAILURES_PER_IP, windowMs: WINDOW_MS },
+    { key: rateKey(secret, 'login-pair', `${email}|${ip}`), limit: LOGIN_FAILURES_PER_PAIR, windowMs: WINDOW_MS, group },
+    { key: rateKey(secret, 'login-email', email), limit: LOGIN_FAILURES_PER_EMAIL, windowMs: HOUR_MS, group },
+  ];
+}
+
+// Statement that forgets every recorded login failure of an email, guarded by `exists` (SQL + args) so it only
+// runs when the same batch changed that account.
+function clearLoginFailures(secret, email, exists) {
+  const s = clearGroupStatement(rateKey(secret, 'login-group', email));
+  return { sql: `${s.sql} AND ${exists.sql}`, args: [...s.args, ...exists.args] };
+}
+
 async function loginSubmit(ctx) {
   const { db, config } = ctx.app;
   const form = await readForm(ctx.req);
@@ -68,11 +88,10 @@ async function loginSubmit(ctx) {
 
   // Rate limit BEFORE any password work. The attempt is reserved atomically in the database (so a burst of
   // parallel requests cannot all slip under the limit) and released again on success: only failures stay recorded.
-  // The IP comes first: an IP that is over its limit cannot add new email keys to the table.
-  const guard = await reserve(db, [
-    { key: rateKey(config.secret, 'login-ip', ctx.ip), limit: LOGIN_FAILURES_PER_IP, windowMs: WINDOW_MS },
-    { key: rateKey(config.secret, 'login-email', email), limit: LOGIN_FAILURES_PER_EMAIL, windowMs: WINDOW_MS },
-  ]);
+  // All-or-nothing: an attempt that any limit refuses is recorded against no bucket (a locked-out victim's retries
+  // cannot burn anything). Failures from one address for one email are limited strictly; the per-email ceiling is
+  // loose, so attackers elsewhere cannot lock the real user out.
+  const guard = await reserve(db, loginSpecs(config.secret, email, ctx.ip));
   if (!guard.ok) return loginPage(ctx, { error: TOO_MANY, status: 429, email, next });
 
   const user = email ? await db.get('SELECT id, active, password_hash FROM users WHERE email = ?', [email]) : undefined;
@@ -115,6 +134,17 @@ function setupPage(ctx, token, { error, status = 200 } = {}) {
 }
 
 // One request budget per IP for the token-bearing POSTs (setup and set-password).
+// Throttle for GETs that check a token: the budget is reserved BEFORE the token is looked at (so an address over
+// its limit learns nothing), and given back when the token turned out to be valid. Returns the validity.
+async function guessGuard(ctx, check) {
+  const { db, config } = ctx.app;
+  const g = await reserve(db, [{ key: rateKey(config.secret, 'token-get', ctx.ip), limit: TOKEN_GUESSES_PER_IP, windowMs: WINDOW_MS }]);
+  if (!g.ok) throw new HttpError(429, TOO_MANY);
+  const result = await check();
+  if (result) await release(db, g);
+  return result;
+}
+
 async function tokenPostBudget(ctx) {
   const { db, config } = ctx.app;
   const r = await reserve(db, [{ key: rateKey(config.secret, 'token-post', ctx.ip), limit: TOKEN_POSTS_PER_IP, windowMs: WINDOW_MS }]);
@@ -123,9 +153,9 @@ async function tokenPostBudget(ctx) {
 
 async function setupSubmit(ctx) {
   const { db, config } = ctx.app;
-  await tokenPostBudget(ctx);
   const form = await readForm(ctx.req);
   verifyPublic(ctx, form);
+  await tokenPostBudget(ctx); // only a request that passed the CSRF check uses up the budget
   const token = form.get('token');
   if (!(await setupAvailable(ctx, token))) throw new HttpError(404, 'Page not found.');
   const error = checkNewPassword(form);
@@ -148,6 +178,10 @@ async function setupSubmit(ctx) {
       sql: 'DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email = ? AND password_hash = ?)',
       args: [config.adminEmail, hash],
     },
+    clearLoginFailures(config.secret, config.adminEmail, {
+      sql: 'EXISTS (SELECT 1 FROM users WHERE email = ? AND password_hash = ?)',
+      args: [config.adminEmail, hash],
+    }),
   ]);
   if (results[0].changes !== 1) throw new HttpError(404, 'Page not found.');
   setFlash(ctx, 'ok', 'Your password is set. Sign in below.');
@@ -189,10 +223,10 @@ function setPasswordPage(ctx, token, email, { error, status = 200 } = {}) {
 }
 
 async function setPasswordSubmit(ctx) {
-  const { db } = ctx.app;
-  await tokenPostBudget(ctx);
+  const { db, config } = ctx.app;
   const form = await readForm(ctx.req);
   verifyPublic(ctx, form);
+  await tokenPostBudget(ctx); // only a request that passed the CSRF check uses up the budget
   const token = form.get('token');
   const row = await findToken(db, token);
   if (!row) return invalidLink(ctx);
@@ -223,6 +257,11 @@ async function setPasswordSubmit(ctx) {
              WHERE ${usable} AND EXISTS (SELECT 1 FROM users u WHERE u.id = auth_tokens.user_id AND u.password_hash = ?)`,
       args: [now, tokenHash, now, hash],
     },
+    // A successful password reset also forgets the account's recorded login failures (the lock).
+    clearLoginFailures(config.secret, normaliseEmail(row.email), {
+      sql: 'EXISTS (SELECT 1 FROM users u WHERE u.email = ? AND u.password_hash = ?)',
+      args: [row.email, hash],
+    }),
   ]);
   if (results[0].changes !== 1) return invalidLink(ctx);
   setFlash(ctx, 'ok', 'Your password is set. Sign in below.');
@@ -256,8 +295,8 @@ async function accountSubmit(ctx) {
   if (error) return accountPage(ctx, { error, status: 400 });
   const current = ctx.form.get('current_password');
 
-  // Guessing the current password from a stolen session counts against the same per-email limit as login.
-  const guard = await reserve(db, [{ key: rateKey(config.secret, 'login-email', ctx.user.email), limit: LOGIN_FAILURES_PER_EMAIL, windowMs: WINDOW_MS }]);
+  // Guessing the current password from a stolen session counts against the same email limits as login.
+  const guard = await reserve(db, loginSpecs(config.secret, ctx.user.email, ctx.ip).slice(1));
   if (!guard.ok) return accountPage(ctx, { error: TOO_MANY, status: 429 });
   const row = await db.get('SELECT password_hash FROM users WHERE id = ? AND active = 1', [ctx.user.id]);
   const oldHash = row && row.password_hash;
@@ -294,14 +333,14 @@ function register(router) {
 
   router.get('/setup', async (ctx) => {
     const token = ctx.query.get('token') || '';
-    if (!(await setupAvailable(ctx, token))) throw new HttpError(404, 'Page not found.');
+    if (!(await guessGuard(ctx, () => setupAvailable(ctx, token)))) throw new HttpError(404, 'Page not found.');
     setupPage(ctx, token);
   });
   router.post('/setup', setupSubmit);
 
   router.get('/set-password', async (ctx) => {
     const token = ctx.query.get('token') || '';
-    const row = await findToken(ctx.app.db, token);
+    const row = await guessGuard(ctx, () => findToken(ctx.app.db, token));
     if (!row) return invalidLink(ctx);
     setPasswordPage(ctx, token, row.email);
   });

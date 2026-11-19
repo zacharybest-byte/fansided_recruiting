@@ -9,6 +9,7 @@ const { nowIso } = require('../lib/db');
 const { MERGE_FIELDS } = require('../lib/email');
 const { randomToken, sha256Hex } = require('../lib/crypto');
 const { idParam } = require('./dashboard');
+const { rateKey } = require('../lib/ratelimit');
 const { loadSample, removeSample, sampleCounts } = require('../lib/sample');
 
 const MAX_QUESTIONS = 5;
@@ -282,7 +283,7 @@ async function samplePage(ctx) {
   page(ctx, {
     title: 'Sample data',
     body: html`<h1>Sample data</h1>
-      <p>For the team demo. Loads 3 sample roles and 8 clearly fake applicants (<code>Sample Applicant ... (demo)</code>, <code>@example.com</code>)
+      <p>For the team demo. Loads 3 sample roles and 8 clearly fake applicants (<code>Sample Applicant ... (demo)</code>, <code>@sample.invalid</code>)
         spread across all five stages. Real data is never touched.</p>
       <p>${c.loaded ? html`Sample data is loaded: ${c.roles} roles, ${c.people} people, ${c.applications} applications.` : 'No sample data is loaded.'}</p>
       <form method="post" action="/app/admin/sample/load" class="inline">${csrfField(ctx)}
@@ -301,7 +302,8 @@ function register(router) {
   router.get('/app/admin/sample', ...A, samplePage);
   router.post('/app/admin/sample/load', ...AP, async (ctx) => {
     const r = await loadSample(ctx.app.db, ctx.user.id);
-    if (!r.ok) setFlash(ctx, 'error', 'Sample data is already loaded. Remove it first.');
+    if (r.failed) setFlash(ctx, 'error', 'Sample data could not be loaded (another load may have run at the same moment). Reload this page to see the current state.');
+    else if (!r.ok) setFlash(ctx, 'error', 'Sample data is already loaded. Remove it first.');
     else {
       ctx.app.log(`[admin] sample data loaded by=${ctx.user.id}`);
       setFlash(ctx, 'ok', `Loaded ${r.roles} sample roles and ${r.people} sample people.`);
@@ -415,6 +417,11 @@ function register(router) {
     const results = await db.batch([
       { sql: 'DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 1)', args: [u.id, u.id] },
       insertToken(kind, token, ctx.user.id, 'id = ? AND active = 1', [u.id]),
+      // The admin acting on the account also lifts its login lock (recorded failures of this email).
+      {
+        sql: 'DELETE FROM rate_limits WHERE grp = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND active = 1)',
+        args: [rateKey(ctx.app.config.secret, 'login-group', normaliseEmail(u.email)), u.id],
+      },
     ]);
     if (results[1].changes !== 1) {
       setFlash(ctx, 'error', 'This user is deactivated. Reactivate them first.');

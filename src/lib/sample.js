@@ -1,8 +1,11 @@
 'use strict';
-// Demo data for the team demo: clearly fake roles and people (example.com), flagged is_sample = 1.
+// Demo data for the team demo: clearly fake roles and people, flagged is_sample = 1. Sample people use the reserved
+// non-deliverable domain SAMPLE_DOMAIN, which the public apply form refuses, so a real applicant can never
+// attach to (or collide with) a sample person.
 // Load and Remove are each ONE db.batch. Ids are found with subselects on the unique sample email / role title,
 // so the same statements work on both database drivers.
 const DAY = 86400000;
+const SAMPLE_DOMAIN = 'sample.invalid';
 
 const ROLES = [
   {
@@ -43,7 +46,7 @@ function samplePeople(now) {
     const role = ROLES[i % ROLES.length];
     const appliedAt = new Date(now - (i + 1) * 2 * DAY).toISOString();
     return {
-      email: `sample.${n.toLowerCase()}@example.com`,
+      email: `sample.${n.toLowerCase()}@${SAMPLE_DOMAIN}`,
       name: `Sample Applicant ${n} (demo)`,
       linkedin: `https://example.com/in/sample-${n.toLowerCase()}`,
       role,
@@ -67,7 +70,9 @@ async function sampleCounts(db) {
   return { roles: r.roles, people: r.people, applications: r.applications, loaded: r.roles > 0 || r.people > 0 };
 }
 
-// Returns { ok: false } when sample data already exists, otherwise inserts it in one batch.
+// Returns { ok: false } when sample data already exists, otherwise inserts it in one batch. The first insert is
+// guarded in SQL by "no sample data yet"; if a concurrent load got there first, the people inserts hit the unique
+// email, the whole batch rolls back and the result is { ok: false, failed: true } (never an exception).
 async function loadSample(db, actorId, nowMs = Date.now()) {
   if ((await sampleCounts(db)).loaded) return { ok: false };
   const nowIso = new Date(nowMs).toISOString();
@@ -76,7 +81,7 @@ async function loadSample(db, actorId, nowMs = Date.now()) {
   for (const r of ROLES) {
     stmts.push({
       sql: `INSERT INTO job_roles (title, vertical, site_name, description, status, assigned_user_id, questions_json, is_sample, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'open', ?, ?, 1, ?, ?)`,
+            SELECT ?, ?, ?, ?, 'open', ?, ?, 1, ?, ? ${stmts.length === 0 ? "WHERE NOT EXISTS (SELECT 1 FROM job_roles WHERE is_sample = 1) AND NOT EXISTS (SELECT 1 FROM people WHERE is_sample = 1)" : ''}`,
       args: [r.title, r.vertical, r.site, r.description, actorId, JSON.stringify(r.questions), nowIso, nowIso],
     });
   }
@@ -113,7 +118,11 @@ async function loadSample(db, actorId, nowMs = Date.now()) {
       args: [actorId, body, nowIso, p.email],
     });
   }
-  await db.batch(stmts);
+  try {
+    await db.batch(stmts);
+  } catch {
+    return { ok: false, failed: true };
+  }
   return { ok: true, people: people.length, roles: ROLES.length };
 }
 
@@ -138,4 +147,4 @@ async function removeSample(db) {
   ]);
 }
 
-module.exports = { loadSample, removeSample, sampleCounts, ROLES };
+module.exports = { loadSample, removeSample, sampleCounts, ROLES, SAMPLE_DOMAIN };

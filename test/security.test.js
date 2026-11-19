@@ -53,7 +53,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
     hook.requests.length = 0;
     const res = await t.client().apply(role, { name: 'Secret Applicant', email: 'secret.applicant@example.com', answer_0: 'sensitive answer', linkedin_url: 'https://linkedin.com/in/secret' });
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/thanks');
+    assert.equal(res.headers.get('location'), '/thanks#top');
     const app = await lastApplication(t.db);
     assert.equal(hook.requests.length, 1);
     const [req] = hook.requests;
@@ -79,7 +79,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
     logs.length = 0;
     const res = await t.client().apply(role, { name: 'Err Case', email: 'err.case@example.com' });
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/thanks');
+    assert.equal(res.headers.get('location'), '/thanks#top');
     const app = await lastApplication(t.db);
     assert.equal(app.stage, 'new');
     assert.equal(hook.requests.length, 1);
@@ -107,7 +107,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
     const res = await t.client().apply(role, { name: 'Hang Case', email: 'hang.case@example.com' });
     const took = Date.now() - started;
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/thanks');
+    assert.equal(res.headers.get('location'), '/thanks#top');
     assert.equal(await count(t.db, 'applications'), before + 1);
     assert.equal(hook.requests.length, 1);
     assert.ok(took >= TIMEOUT_MS - 200 && took < TIMEOUT_MS + 3000, `took ${took} ms (timeout ${TIMEOUT_MS})`);
@@ -131,7 +131,7 @@ describe(`[${driver}] AC-54: webhook`, () => {
 });
 
 describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, () => {
-  test('the New count is highlighted per role; +N appears once for applications after the previous view and is gone on reload (also across app restarts)', async () => {
+  test('F-09: the New count is highlighted per role; +N counts from the stamp that only the POST "Mark as seen" moves (GET never writes, also across restarts)', async () => {
     let t = await startApp({ driver });
     try {
       const rep = await makeUser(t.db, { email: 'rep@fansided.com', name: 'Rita Rep' });
@@ -141,15 +141,26 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       const quiet = await makeRole(t.db, { title: 'Quiet', assigned: rep });
       const row = (text, id) => new RegExp(`<tr data-role-id="${id}">[\\s\\S]*?</tr>`).exec(text)[0];
       const newCell = (text, id) => /<td class="num[^"]*" data-stage="new">[\s\S]*?<\/td>/.exec(row(text, id))[0];
+      const stamp = async () => (await t.db.get("SELECT dashboard_seen_at FROM users WHERE email = 'rep@fansided.com'")).dashboard_seen_at;
       await t.client().apply(roleA, { email: 'before1@example.com' }); // arrived before the first visit
 
       let c = t.client();
-      await c.login('rep@fansided.com'); // the redirect to /app is the first view
+      await c.login('rep@fansided.com');
       const first = await c.get('/app');
       assert.match(newCell(first.text, roleA), /class="num highlight"/);
       assert.match(newCell(first.text, roleA), />1</);
       assert.doesNotMatch(first.text, /since your last visit/);
       assert.doesNotMatch(newCell(first.text, quiet), /highlight/); // zero New is not highlighted
+      assert.equal(await stamp(), null, 'GET /app must not write the stamp');
+      assert.match(first.text, /<form method="post" action="\/app\/seen"[^>]*>[\s\S]*?name="csrf"[\s\S]*?Mark as seen/);
+
+      // Without the CSRF token nothing happens.
+      assert.equal((await c.post('/app/seen', {}, { csrf: 'nope' })).status, 403);
+      assert.equal(await stamp(), null);
+      const marked = await c.post('/app/seen', {}, { csrf: c.csrf(first.text) });
+      assert.equal(marked.status, 303);
+      assert.equal(marked.headers.get('location'), '/app');
+      assert.ok(await stamp());
 
       await new Promise((r) => setTimeout(r, 15));
       await t.client().apply(roleA, { email: 'a1@example.com' });
@@ -162,28 +173,35 @@ describe(`[${driver}] AC-55: dashboard New counts and "since your last visit"`, 
       assert.match(newCell(seen.text, roleA), /highlight/);
       assert.match(newCell(seen.text, roleB), /\+1 since your last visit/);
       assert.doesNotMatch(row(seen.text, quiet), /since your last visit/);
+      // F-09: reloading (GET) does not clear it any more.
+      const before = await stamp();
       const reload = await c.get('/app');
-      assert.doesNotMatch(reload.text, /since your last visit/);
-      assert.match(newCell(reload.text, roleA), />3</); // the count itself stays
+      assert.match(newCell(reload.text, roleA), /\+2 since your last visit/);
+      assert.match(newCell((await c.get('/app?view=all')).text, roleB), /\+1 since your last visit/);
+      assert.equal(await stamp(), before, 'GETs never move the stamp');
+      // Viewing a pipeline does not clear it either.
+      await c.get(`/app/roles/${roleA}`);
+      assert.match(newCell((await c.get('/app')).text, roleA), /\+2 since your last visit/);
 
-      // Per user: another rep's stamp is independent; "All roles" view also shows it.
+      // "Mark as seen" clears it; the count itself stays. The "All roles" view returns to itself.
+      const csrf = c.csrf(reload.text);
+      const all = await c.post('/app/seen', { view: 'all' }, { csrf });
+      assert.equal(all.headers.get('location'), '/app?view=all');
+      const cleared = await c.get('/app');
+      assert.doesNotMatch(cleared.text, /since your last visit/);
+      assert.match(newCell(cleared.text, roleA), />3</);
+
+      // Per user: another rep's stamp is independent.
       await makeRole(t.db, { title: 'Other role', assigned: other });
       const oc = t.client();
       await oc.login('other@fansided.com');
+      await oc.post('/app/seen', {}, { csrf: oc.csrf((await oc.get('/app')).text) });
       await new Promise((r) => setTimeout(r, 15));
       await t.client().apply(roleB, { email: 'b2@example.com' });
-      const all = await c.get('/app?view=all');
-      assert.match(newCell(all.text, roleB), /\+1 since your last visit/);
-      assert.doesNotMatch((await c.get('/app?view=all')).text, /since your last visit/);
-      const otherView = await oc.get('/app?view=all');
-      assert.match(newCell(otherView.text, roleB), /\+1 since your last visit/);
-      // The stamp is stored in the database.
-      assert.ok((await t.db.get("SELECT dashboard_seen_at FROM users WHERE email = 'rep@fansided.com'")).dashboard_seen_at);
-      // Only the dashboard stamps: viewing a pipeline does not clear it.
-      await new Promise((r) => setTimeout(r, 15));
-      await t.client().apply(roleA, { email: 'a3@example.com' });
-      await c.get(`/app/roles/${roleA}`);
-      assert.match(newCell((await c.get('/app')).text, roleA), /\+1 since your last visit/);
+      assert.match(newCell((await c.get('/app?view=all')).text, roleB), /\+1 since your last visit/);
+      assert.match(newCell((await oc.get('/app?view=all')).text, roleB), /\+1 since your last visit/);
+      // Signed-out POST is refused (redirect to login), nothing changes.
+      assert.equal((await t.client().post('/app/seen', {}, { csrf: '' })).status, 302);
     } finally {
       await t.close();
     }

@@ -77,11 +77,11 @@ function requireAdmin(ctx) {
   if (ctx.user.role !== 'admin') throw new HttpError(403, 'Admins only');
 }
 
-// Only allow redirects back into the internal app: "/app" paths, no "//", no backslash, no control characters.
+// Only allow redirects back into the internal app: "/app" paths in printable ASCII (no space, no control or
+// non-ASCII characters: those cannot go into a Location header), no "//", no backslash.
 function safeNext(value) {
   const v = String(value || '');
-  // eslint-disable-next-line no-control-regex
-  return /^\/app(\/|\?|$)/.test(v) && !v.includes('//') && !v.includes('\\') && !/[\x00-\x1f\x7f]/.test(v) ? v : '/app';
+  return /^\/app(\/|\?|$)/.test(v) && /^[\x21-\x7e]+$/.test(v) && !v.includes('//') && !v.includes('\\') ? v : '/app';
 }
 
 module.exports = { newSession, setSessionCookie, loadSession, destroySession, requireUser, requireAdmin, normaliseEmail, safeNext, SESSION_COOKIE };

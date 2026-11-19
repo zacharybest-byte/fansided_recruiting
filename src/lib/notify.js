@@ -2,7 +2,7 @@
 // Optional webhook (a chat incoming webhook): "New application for <role>: <link>".
 // The text never contains anything about the applicant. Failures are logged by application id only and
 // never reach the applicant.
-const TIMEOUT_MS = 3000;
+const TIMEOUT_MS = 1500;
 
 async function notifyNewApplication({ webhookUrl, fetchImpl, log, roleTitle, applicationId, baseUrl }) {
   if (!webhookUrl) return false;

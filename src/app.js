@@ -105,7 +105,10 @@ function createApp(options = {}) {
       }
       const match = router.match(ctx.method, ctx.path);
       if (!match) throw new HttpError(404, 'Page not found.');
-      if (match.methodNotAllowed) throw new HttpError(405, 'Method not allowed.');
+      if (match.methodNotAllowed) {
+        res.setHeader('Allow', match.allow.join(', '));
+        throw new HttpError(405, 'Method not allowed.');
+      }
       ctx.params = match.params;
       for (const h of match.handlers) {
         await h(ctx);

@@ -172,11 +172,12 @@ describe('AC-37: Turso HTTP driver', () => {
 
   test('URL handling: libsql:// becomes https://, http:// only for localhost, no credentials in the URL', () => {
     assert.equal(pipelineUrl('libsql://my-db-org.turso.io'), 'https://my-db-org.turso.io/v2/pipeline');
+    assert.equal(pipelineUrl('turso://my-db-org.turso.io'), 'https://my-db-org.turso.io/v2/pipeline');
     assert.equal(pipelineUrl('https://my-db-org.turso.io/'), 'https://my-db-org.turso.io/v2/pipeline');
     assert.equal(pipelineUrl('http://127.0.0.1:8080'), 'http://127.0.0.1:8080/v2/pipeline');
     assert.equal(pipelineUrl('http://localhost:8080'), 'http://localhost:8080/v2/pipeline');
     assert.throws(() => pipelineUrl('http://db.example.com'), /https/);
-    assert.throws(() => pipelineUrl('ftp://db.example.com'), /libsql:\/\/ or https/);
+    assert.throws(() => pipelineUrl('ftp://db.example.com'), /libsql:\/\/, turso:\/\/ or https/);
     assert.throws(() => pipelineUrl('https://user:pw@db.example.com'), (e) => /credentials/.test(e.message) && !e.message.includes('pw'));
     assert.throws(() => pipelineUrl('not a url'), /not a valid URL/);
     assert.throws(() => createTursoDb({ url: 'https://db.example.com', token: '' }), /TURSO_AUTH_TOKEN/);
@@ -401,7 +402,7 @@ for (const driver of DRIVERS) {
         const events = await t.db.all('SELECT * FROM application_events ORDER BY id');
         const people = await t.db.all('SELECT * FROM people ORDER BY id');
         assert.equal(people.length, 2);
-        assert.equal(people[0].name, 'Second Name'); // upsert updated the name
+        assert.equal(people[0].name, 'First Name'); // F-05: an existing person keeps their name (the application row keeps what was typed)
         assert.equal(apps.length, 3);
         assert.deepEqual(apps.map((a) => a.person_id), [people[0].id, people[0].id, people[1].id]);
         assert.equal(events.length, 3);

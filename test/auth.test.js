@@ -268,30 +268,56 @@ describe(`[${driver}] password sign-in`, () => {
     }
   });
 
-  test('AC-45: 5 failures for one email lock it (even for the right password); 20 from one IP lock the IP; both expire', async () => {
+  test('AC-45: 5 failures per (email, IP) lock that pair, 50 per email per hour is the loose ceiling, 20 per IP lock the IP; refused attempts are never recorded; all expire', async () => {
     await t.db.run('DELETE FROM rate_limits');
     await makeUser(t.db, { email: 'fresh@fansided.com', name: 'Fresh' });
     const ip = '203.0.113.50';
-    // email limit
+    // pair limit: one email from one address
     for (let i = 0; i < 5; i++) assert.equal((await t.client({ ip }).login('rep@fansided.com', `wrong password ${i}`)).status, 401);
     const locked = await t.client({ ip }).login('rep@fansided.com', TEST_PASSWORD);
     assert.equal(locked.status, 429);
     assert.match(locked.text, /Too many attempts\. Try again later\./);
     assert.ok(!hasSid(locked));
+    // F-01: a refused attempt is recorded against NO bucket (not the pair, not the email, not the IP).
+    const rowsBefore = await count(t.db, 'rate_limits');
+    for (let i = 0; i < 3; i++) assert.equal((await t.client({ ip }).login('rep@fansided.com', TEST_PASSWORD)).status, 429);
+    assert.equal(await count(t.db, 'rate_limits'), rowsBefore);
     // Same message and status whether or not the account exists (limited before any lookup).
     for (let i = 0; i < 5; i++) await t.client({ ip: '203.0.113.51' }).login('ghost@fansided.com', 'wrong password');
-    const ghost = await t.client({ ip: '203.0.113.52' }).login('ghost@fansided.com', 'x');
+    const ghost = await t.client({ ip: '203.0.113.51' }).login('ghost@fansided.com', 'x');
     assert.equal(ghost.status, 429);
     assert.match(ghost.text, /Too many attempts\. Try again later\./);
     // Stored in the DB as HMAC keys, not raw values.
-    const keys = await t.db.all('SELECT key FROM rate_limits');
+    const keys = await t.db.all('SELECT key, grp FROM rate_limits');
     assert.ok(keys.length >= 10);
-    assert.ok(keys.every((k) => /^[0-9a-f]{64}$/.test(k.key)));
+    assert.ok(keys.every((k) => /^[0-9a-f]{64}$/.test(k.key) && (k.grp === null || /^[0-9a-f]{64}$/.test(k.grp))));
     assert.doesNotMatch(JSON.stringify(keys), /rep@fansided|203\.0\.113/);
-    // Another email from another IP is not affected; after the window the lock is gone.
+    // Another email from another IP is not affected; the SAME email from another IP is not either (F-01).
     assert.equal((await t.client({ ip: '203.0.113.53' }).login('fresh@fansided.com')).status, 303);
+    assert.equal((await t.client({ ip: '203.0.113.55' }).login('rep@fansided.com')).status, 303);
     await t.db.run('UPDATE rate_limits SET at = ?', [new Date(Date.now() - 16 * 60000).toISOString()]);
-    assert.equal((await t.client({ ip: '203.0.113.54' }).login('rep@fansided.com')).status, 303);
+    assert.equal((await t.client({ ip }).login('rep@fansided.com')).status, 303); // the pair lock expired after 15 minutes
+
+    // F-01: failures from IP A do not block the victim's correct login from IP B, however many.
+    await t.db.run('DELETE FROM rate_limits');
+    for (let i = 0; i < 12; i++) await t.client({ ip: '192.0.2.66' }).login('rep@fansided.com', `attacker guess ${i}`); // 5 recorded, the rest refused
+    assert.equal((await t.client({ ip: '192.0.2.66' }).login('rep@fansided.com', TEST_PASSWORD)).status, 429); // the attacker's own pair is locked
+    const victim = await t.client({ ip: '198.18.0.7' }).login('rep@fansided.com', TEST_PASSWORD);
+    assert.equal(victim.status, 303, 'the victim, from another address, signs in');
+    assert.ok(hasSid(victim));
+
+    // Per-email ceiling: 50 failures per hour from many addresses, then even the right password is refused (for now).
+    await t.db.run('DELETE FROM rate_limits');
+    for (let i = 0; i < 50; i++) assert.equal((await t.client({ ip: `192.0.2.${100 + (i % 100)}`, }).login('rep@fansided.com', `spray ${i}`)).status, 401, `attempt ${i + 1}`);
+    const sprayed = await t.client({ ip: '198.18.0.8' }).login('rep@fansided.com', TEST_PASSWORD);
+    assert.equal(sprayed.status, 429);
+    const rows = await count(t.db, 'rate_limits');
+    await t.client({ ip: '198.18.0.8' }).login('rep@fansided.com', TEST_PASSWORD);
+    assert.equal(await count(t.db, 'rate_limits'), rows, 'refused attempts leave nothing behind');
+    await t.db.run('UPDATE rate_limits SET at = ?', [new Date(Date.now() - 16 * 60000).toISOString()]);
+    assert.equal((await t.client({ ip: '198.18.0.8' }).login('rep@fansided.com', TEST_PASSWORD)).status, 429, 'still within the hour');
+    await t.db.run('UPDATE rate_limits SET at = ?', [new Date(Date.now() - 61 * 60000).toISOString()]);
+    assert.equal((await t.client({ ip: '198.18.0.8' }).login('rep@fansided.com', TEST_PASSWORD)).status, 303);
 
     // IP limit: 20 failures for different emails, then even a valid login from that IP is refused.
     await t.db.run('DELETE FROM rate_limits');
@@ -432,7 +458,7 @@ describe(`[${driver}] AC-40: no in-memory state (the app is rebuilt before every
 }
 
 describe('AC-42: production configuration', () => {
-  const GOOD = { NODE_ENV: 'production', SESSION_SECRET: 'x'.repeat(40), TURSO_DATABASE_URL: 'http://127.0.0.1:9', TURSO_AUTH_TOKEN: 'tok-secret-value' };
+  const GOOD = { NODE_ENV: 'production', SESSION_SECRET: 'Zq7-Lm2xPv9Ke4Wd8Ns1Ra5Tc3Yb6Hg0Jf2Uo', TURSO_DATABASE_URL: 'http://127.0.0.1:9', TURSO_AUTH_TOKEN: 'tok-secret-value' };
 
   async function status(app, method = 'GET', url = '/') {
     const http = require('node:http');
@@ -452,6 +478,10 @@ describe('AC-42: production configuration', () => {
     const cases = [
       [{ ...GOOD, SESSION_SECRET: 'too-short-secret' }, ['SESSION_SECRET'], 'too-short-secret'],
       [{ ...GOOD, SESSION_SECRET: undefined }, ['SESSION_SECRET'], null],
+      // F-10: long enough but only a few distinct characters / only whitespace around too few
+      [{ ...GOOD, SESSION_SECRET: 'ab'.repeat(30) }, ['SESSION_SECRET'], null],
+      [{ ...GOOD, SESSION_SECRET: `  ${'x'.repeat(40)}  ` }, ['SESSION_SECRET'], null],
+      [{ ...GOOD, SESSION_SECRET: `${'k'.repeat(20)}${' '.repeat(20)}` }, ['SESSION_SECRET'], null],
       [{ ...GOOD, TURSO_DATABASE_URL: '' }, ['TURSO_DATABASE_URL'], null],
       [{ ...GOOD, TURSO_AUTH_TOKEN: '' }, ['TURSO_AUTH_TOKEN'], null],
       [{ NODE_ENV: 'production' }, ['SESSION_SECRET', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN'], null],

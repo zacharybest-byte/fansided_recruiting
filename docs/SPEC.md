@@ -65,7 +65,7 @@ Reps see every role (PTO cover). The dashboard defaults to "my roles".
 4. **Login** `/login`: email + password. Any failure shows the same message ("Email or password is
    incorrect."); rate-limited attempts show "Too many attempts. Try again later." whether or not the
    account exists. Text: "Forgot your password? Ask an admin for a reset link." `next` is honoured only for
-   `/app...` paths.
+   `/app...` paths made of printable ASCII.
 5. **First-admin setup** `/setup?token=SETUP_TOKEN`: set a password for `ADMIN_EMAIL`. Works only while no
    active admin has a password; afterwards (and for a wrong/missing token, or missing env) it is a 404.
 6. **Set password** `/set-password?token=...`: reached from an invite or reset link. Shows the account
@@ -138,7 +138,7 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
   the password, marks the token used and deletes all the user's sessions in one guarded batch (a second
   use, a race, an expired token or a deactivated user changes nothing). The link is rendered once in the
   POST response (`Cache-Control: no-store`), never stored in plain text or logged.
-- **Setup link.** `SETUP_TOKEN` (>= 20 chars) compared timing-safe. The password write is guarded in SQL by
+- **Setup link.** `SETUP_TOKEN` (>= 32 chars, >= 10 distinct) compared timing-safe. Invalid-token GETs of `/setup` and `/set-password` are limited to 30 per IP per 15 min (valid tokens do not count); the POST budget is taken only after the CSRF check. The password write is guarded in SQL by
   "no active admin has a password", so it works once. `ADMIN_EMAIL` becomes an active admin.
 - **Sessions.** 32-byte random token in cookie `sid` (`HttpOnly; Secure; SameSite=Lax; Path=/`, 14 days);
   DB stores its SHA-256. A new token is issued at every login (no pre-login session exists). Logout
@@ -147,20 +147,25 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
 - **CSRF.** Internal POSTs: hidden field = `HMAC-SHA256(SESSION_SECRET, "csrf:" + session token)`.
   Pre-session POSTs (apply, login, setup, set-password): double-submit cookie whose value is a random nonce
   plus its HMAC under `SESSION_SECRET`; the field must equal the cookie and the HMAC must verify.
-  Missing/invalid token: 403, nothing changes. No GET changes state (except the dashboard "seen" stamp).
-- **Rate limits (DB).** Rows in `rate_limits`, counted inside the window, old rows pruned opportunistically.
-  Apply: 10 stored applications/honeypot hits per IP per hour. Login: 5 failures per email per 15 min and
-  20 failures per IP per 15 min, checked before the password is verified. Setup and set-password POSTs:
-  10 per IP per 15 min. Client IP: `x-vercel-forwarded-for` on Vercel, socket address locally.
+  Missing/invalid token: 403, nothing changes. No GET changes state: the dashboard "seen" stamp is moved by the POST `/app/seen` ("Mark as seen", CSRF-protected).
+- **Rate limits (DB).** Rows in `rate_limits` (`key` = HMAC, optional `grp`), counted inside the window, old rows
+  pruned opportunistically. Every limit is reserved atomically in the same batch as the work it guards, and a
+  reservation is all-or-nothing: a request refused by one limit is recorded against none.
+  Apply: 10 stored applications/honeypot hits per IP per hour (the application inserts depend on the reserved
+  row). Login: 5 failures per (email, IP) and 20 per IP per 15 min, 50 per email per hour, checked before the
+  password is verified; `grp` ties an email's rows together so an admin reset can clear them. Setup and
+  set-password POSTs (after CSRF): 10 per IP per 15 min; invalid-token GETs of those pages: 30 per IP per 15 min.
+  Client IP: `x-vercel-forwarded-for` on Vercel (right-most entry), socket address locally; IPv6 by /64.
 - **Dashboard counts.** New per role from live data. "Since your last visit" = applications with
-  `applied_at > users.dashboard_seen_at`; the dashboard then stamps `dashboard_seen_at = now`.
+  `applied_at > users.dashboard_seen_at`; only the explicit "Mark as seen" POST stamps `dashboard_seen_at = now`
+  (viewing the dashboard never writes). Until a user has marked something as seen nothing is shown.
 - **Webhook.** If `NOTIFY_WEBHOOK_URL` (https only) is set, after an application is stored:
-  `POST {"text": "New application for <role title>: <BASE_URL>/app/applications/<id>"}` with a 3-second
+  `POST {"text": "New application for <role title>: <BASE_URL>/app/applications/<id>"}` with a 1.5-second
   timeout, awaited, errors swallowed. The text never contains the applicant's name, email or answers.
   Failure is logged with the application id only and never affects the applicant's response.
 - **Sample data.** Load inserts 3 sample roles and ~8 clearly fake people (`Sample ... (demo)`,
-  `@example.com`), with applications across all stages, notes and events, flagged `is_sample`. Refused if
-  sample data is already loaded. Remove deletes sample people and everything attached to them, and sample
+  `@sample.invalid`, a reserved non-deliverable domain the public apply form refuses), with applications across all stages, notes and events, flagged `is_sample`. Refused if
+  sample data is already loaded; the first insert is guarded in SQL and a load that fails (for example two at once) becomes a flash message, not a 500. Remove deletes sample people and everything attached to them, and sample
   roles; a sample role that has real applications is closed and kept. Neither touches real data.
 - **Base URL.** `BASE_URL`, else `https://` + `VERCEL_PROJECT_PRODUCTION_URL`, else `https://` + `VERCEL_URL`,
   else the request host (non-production only). Used for invite/reset links and the webhook link.
@@ -180,7 +185,7 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
   `Cache-Control: no-store`.
 - Logs carry ids only: never applicant or user names/emails, passwords, tokens or secrets.
 - Production (`NODE_ENV=production` or running on Vercel) refuses to serve without `SESSION_SECRET`
-  (>= 32 chars), `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`: `npm start` exits non-zero; the Vercel function
+  (>= 32 chars, >= 16 distinct), `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`: `npm start` exits non-zero; the Vercel function
   answers 500 with a generic page and logs the missing variable **names**. There is no dev-login bypass in
   any mode. Outside production a missing `SESSION_SECRET` falls back to a fixed dev value with a warning,
   and the server prints the `/setup` link when no admin has a password.
@@ -192,7 +197,7 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
 | Var | Required | Purpose |
 |---|---|---|
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | production | Injected by the Vercel Turso integration. Absent locally = `node:sqlite` in `./data`. `http://` is accepted only for `localhost`/`127.0.0.1` (the test fake). |
-| `SESSION_SECRET` | production | >= 32 random chars; CSRF and key hashing |
+| `SESSION_SECRET` | production | trimmed; >= 32 chars with >= 16 distinct; CSRF, flash and key hashing |
 | `ADMIN_EMAIL`, `SETUP_TOKEN` | first run | First-admin setup link |
 | `BASE_URL` | no | Public URL for links (see §6) |
 | `NOTIFY_WEBHOOK_URL` | no | Google Chat / Slack incoming webhook |
@@ -219,11 +224,11 @@ Kept from v1 (numbers unchanged; wording updated where v2 changes the mechanism)
 - **AC-02** A closed role shows "no longer open"; a POST to apply for it creates nothing.
 - **AC-03** `?source=` survives from `/` to the stored `source_tag`.
 - **AC-04** The role page shows exactly that role's questions; a missing required answer shows an error and keeps the other values.
-- **AC-05** No name, invalid email or no writing-sample link is rejected with field errors.
+- **AC-05** No name, invalid email or no writing-sample link is rejected with field errors. An email is one plain address: one `@`, a local part of letters, digits and `. _ + -`, a dotted domain; anything containing `? & = % / #`, whitespace, quotes, angle brackets, commas or semicolons is refused, as is the sample domain `@sample.invalid`. Every `mailto:` link percent-encodes the address.
 - **AC-06** A valid submission creates one application in New with one system `stage_change` event and redirects to `/thanks`.
-- **AC-07** Same email in different case twice: one person, two applications.
+- **AC-07** Same email in different case twice: one person, two applications. The person keeps the first name and LinkedIn (a LinkedIn is filled in only while empty); each application stores the name and LinkedIn as submitted and the candidate page shows them when they differ.
 - **AC-08** Answers are stored with the question text; later question edits do not change them.
-- **AC-11** A filled honeypot shows thanks and stores nothing. The 11th stored submission from one IP within an hour is rejected, **and still is after the process restarts** (limit is in the DB).
+- **AC-11** A filled honeypot shows thanks and stores nothing. The 11th stored submission from one IP within an hour is rejected, **and still is after the process restarts** (limit is in the DB), **and under parallel requests**: the limit is reserved inside the apply batch, so 30 simultaneous submissions from one IP store exactly 10. IPv6 addresses are bucketed by /64.
 - **AC-15** A rep gets 403 on every `/app/admin/*` route (GET and POST, including unknown paths) and on candidate delete.
 - **AC-16** An internal POST without a valid CSRF token returns 403 and changes nothing.
 - **AC-17** The session cookie is HttpOnly, Secure, SameSite=Lax. After logout or deactivation the old cookie no longer works.
@@ -260,7 +265,7 @@ Database and hosting
 Password sign-in
 - **AC-43** Correct email + password signs in and issues a new session token; the DB holds only the token's hash. Wrong password, unknown email, deactivated user and password-less user all get the same status and message and no session.
 - **AC-44** Passwords are stored as salted scrypt (two users with the same password have different hashes; the plain password appears nowhere in the DB); passwords under 12 or over 200 characters are refused everywhere a password is set.
-- **AC-45** After 5 failed logins for one email the 6th is refused even with the correct password; after 20 failures from one IP further attempts for other emails are refused; both are stored in the DB and expire after the window.
+- **AC-45** Login failures are limited per (email, IP) to 5 per 15 minutes (strict), per email to 50 per hour (a loose ceiling, so strangers cannot lock a user out) and per IP to 20 per 15 minutes; the correct password is refused while a limit applies. The limits are stored in the DB (HMAC keys) and expire; an attempt refused by a limit is recorded against no bucket; a success leaves no rows. Failures from IP A never block the same user's correct login from IP B. Creating an admin reset link, or using one (or the setup link), clears that email's recorded failures.
 - **AC-46** `next` only redirects to `/app...` paths; `//evil.example`, `/\evil`, `https://evil.example` and `/app//evil` fall back to `/app`.
 - **AC-47** Changing your password requires the current password, kills every other session of that user, and keeps the current browser signed in with a new token; the old password stops working.
 
@@ -274,14 +279,14 @@ Email, alerts, links
 - **AC-52** "Open in Gmail" returns a hand-off page whose link is `https://mail.google.com/mail/?view=cm&fs=1&to=<person email>&su=<subject>&body=<body>` correctly percent-encoded (newlines, `&`, `#`, non-ASCII), and logs one `emails_sent` row (subject, body, template, rep, role, via gmail). "Open in mail app" does the same with a `mailto:` link (via mailto). The recipient cannot be overridden from the form.
 - **AC-53** The apply form accepts `https://` links only for LinkedIn, resume and samples: `http://`, `javascript:`, `data:` are rejected with field errors; stored non-https values are never rendered as links. `multipart/form-data` posts are refused (415) and no file route exists.
 - **AC-54** With `NOTIFY_WEBHOOK_URL` set, a stored application sends one `POST {"text": ...}` containing the role title and candidate link and **not** the applicant's name or email. A webhook that errors, returns 500 or hangs past the timeout still results in a stored application and a redirect to `/thanks`. Without the variable nothing is sent.
-- **AC-55** The dashboard highlights the New count per role and shows "+N since your last visit" for applications that arrived after the user's previous dashboard view; reloading clears it.
+- **AC-55** The dashboard highlights the New count per role and shows "+N since your last visit" for applications that arrived after the stamp `dashboard_seen_at`. Viewing the dashboard (GET) never writes; the CSRF-protected "Mark as seen" POST moves the stamp and clears the "+N".
 
 Security and data
 - **AC-56** Every response (HTML, redirect, 403/404/413/500, static file) carries the §7 headers; HSTS only in production; no page contains inline `<script>` content, inline event handlers or `style=` attributes.
 - **AC-57** A body over 512 KB gets 413; over-length fields get field errors or 400 and are not stored.
 - **AC-58** SQL metacharacters (`' OR 1=1 --`, `"; DROP TABLE users; --`) in login, apply, notes, search/filter parameters and ids are stored/handled as plain text and change nothing else; non-numeric ids give 404.
 - **AC-59** Log output for apply, login failure, invite creation, webhook failure and delete candidate contains ids only (no applicant/user email or name, no token, no password).
-- **AC-60** Load sample data creates the flagged roles, people (all `@example.com`) and applications in every stage; loading twice is refused; Remove sample data deletes them and leaves real roles, people and applications untouched; a rep gets 403 on both.
+- **AC-60** Load sample data creates the flagged roles, people (all `@sample.invalid`) and applications in every stage; loading twice is refused; Remove sample data deletes them and leaves real roles, people and applications untouched; a rep gets 403 on both; two simultaneous loads give no 500 and exactly one set of data; a real applicant using `sample.one@example.com` is a normal applicant.
 
 ## 11. Not in v2 (later)
 

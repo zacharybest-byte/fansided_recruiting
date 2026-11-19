@@ -26,17 +26,21 @@ function parseUrl(value, protocols) {
   }
 }
 
+const distinct = (s) => new Set(s).size;
+// A secret is usable when it is long enough AND not a few characters repeated ("aaaa...", "abababab...").
+const strongSecret = (s, minLength, minDistinct) => s.length >= minLength && distinct(s) >= minDistinct;
+
 function loadConfig(env = process.env) {
   const vercel = Boolean(env.VERCEL);
   const production = env.NODE_ENV === 'production' || vercel;
   const warnings = [];
   const tursoUrl = String(env.TURSO_DATABASE_URL || '').trim();
   const tursoToken = String(env.TURSO_AUTH_TOKEN || '');
-  const sessionSecret = String(env.SESSION_SECRET || '');
+  const sessionSecret = String(env.SESSION_SECRET || '').trim();
 
   const missing = [];
   if (production) {
-    if (sessionSecret.length < 32) missing.push('SESSION_SECRET');
+    if (!strongSecret(sessionSecret, 32, 16)) missing.push('SESSION_SECRET');
     if (!tursoUrl) missing.push('TURSO_DATABASE_URL');
     if (!tursoToken) missing.push('TURSO_AUTH_TOKEN');
   } else if (tursoUrl && !tursoToken) {
@@ -45,9 +49,9 @@ function loadConfig(env = process.env) {
   if (missing.length) throw new ConfigError(missing);
 
   let secret = sessionSecret;
-  if (!production && sessionSecret.length < 32) {
+  if (!production && !strongSecret(sessionSecret, 32, 16)) {
     secret = DEV_SECRET;
-    warnings.push('SESSION_SECRET is missing or shorter than 32 characters: using a fixed development value. Never do this in production.');
+    warnings.push('SESSION_SECRET is missing, shorter than 32 characters or has fewer than 16 distinct characters: using a fixed development value. Never do this in production.');
   }
 
   const adminEmail = String(env.ADMIN_EMAIL || '').trim().toLowerCase();
@@ -56,10 +60,10 @@ function loadConfig(env = process.env) {
     validAdmin = '';
     warnings.push('ADMIN_EMAIL is not a valid email address: the setup link is disabled.');
   }
-  let setupToken = String(env.SETUP_TOKEN || '');
-  if (setupToken && setupToken.length < 20) {
+  let setupToken = String(env.SETUP_TOKEN || '').trim();
+  if (setupToken && !strongSecret(setupToken, 32, 10)) {
     setupToken = '';
-    warnings.push('SETUP_TOKEN is shorter than 20 characters: the setup link is disabled.');
+    warnings.push('SETUP_TOKEN is shorter than 32 characters or has fewer than 10 distinct characters: the setup link is disabled.');
   }
 
   let webhookUrl = '';

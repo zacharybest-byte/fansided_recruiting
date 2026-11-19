@@ -322,7 +322,7 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       assert.equal(load.status, 303);
       assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 3);
       assert.equal(await count(t.db, 'people', 'is_sample = 1'), 8);
-      assert.equal(await count(t.db, 'people', "is_sample = 1 AND email LIKE '%@example.com' AND name LIKE 'Sample % (demo)'"), 8);
+      assert.equal(await count(t.db, 'people', "is_sample = 1 AND email LIKE 'sample.%@sample.invalid' AND name LIKE 'Sample % (demo)'"), 8);
       const stages = await t.db.all('SELECT DISTINCT stage FROM applications ORDER BY stage');
       assert.deepEqual(stages.map((s) => s.stage).filter((s) => s !== 'new').sort(), ['onboarded', 'passed', 'reviewing', 'trial']);
       assert.ok(stages.some((s) => s.stage === 'new'));
@@ -352,7 +352,7 @@ for (const driver of DRIVERS) describe(`AC-60 [${driver}]`, () => {
       assert.equal(remove.status, 303);
       assert.equal(await count(t.db, 'people', 'is_sample = 1'), 0);
       assert.equal(await count(t.db, 'job_roles', 'is_sample = 1'), 0);
-      assert.equal(await count(t.db, 'people', "email LIKE '%@example.com' AND email LIKE 'sample.%'"), 0);
+      assert.equal(await count(t.db, 'people', "email LIKE 'sample.%'"), 0);
       assert.equal(await count(t.db, 'deletion_log'), logBefore);
       const kept = await t.db.get('SELECT status, is_sample FROM job_roles WHERE id = ?', [keepRole]);
       assert.deepEqual({ ...kept }, { status: 'closed', is_sample: 0 });

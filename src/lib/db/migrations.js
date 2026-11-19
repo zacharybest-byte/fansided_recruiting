@@ -67,6 +67,8 @@ const BASELINE = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id INTEGER NOT NULL REFERENCES people(id),
     role_id INTEGER NOT NULL REFERENCES job_roles(id),
+    applicant_name TEXT NOT NULL DEFAULT '',
+    applicant_linkedin TEXT NOT NULL DEFAULT '',
     stage TEXT NOT NULL DEFAULT 'new' CHECK (stage IN ('new','reviewing','trial','onboarded','passed')),
     sample_links TEXT NOT NULL DEFAULT '',
     resume_url TEXT NOT NULL DEFAULT '',
@@ -132,11 +134,14 @@ const BASELINE = [
     actor_user_id INTEGER REFERENCES users(id),
     at TEXT NOT NULL
   )`,
+  // grp (optional) ties rows of one family together, e.g. every login failure of one email (cleared by an admin reset).
   `CREATE TABLE rate_limits (
     key TEXT NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    grp TEXT
   )`,
   'CREATE INDEX rate_limits_key_at ON rate_limits(key, at)',
+  'CREATE INDEX rate_limits_grp ON rate_limits(grp)',
 ];
 
 const TEMPLATES = [

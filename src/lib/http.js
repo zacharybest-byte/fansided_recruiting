@@ -3,6 +3,7 @@
 const { parseCookies, serializeCookie } = require('./cookies');
 const { resolveBaseUrl } = require('./config');
 const { SafeHtml } = require('./render');
+const net = require('node:net');
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -180,11 +181,12 @@ class Router {
     this.add('POST', p, ...h);
   }
   match(method, path) {
-    let pathMatched = false;
+    const allow = new Set();
     for (const r of this.routes) {
       const m = r.re.exec(path);
       if (!m) continue;
-      pathMatched = true;
+      allow.add(r.method);
+      if (r.method === 'GET') allow.add('HEAD');
       if (r.method === method || (method === 'HEAD' && r.method === 'GET')) {
         const params = {};
         r.keys.forEach((k, i) => {
@@ -197,24 +199,45 @@ class Router {
         return { handlers: r.handlers, params };
       }
     }
-    return pathMatched ? { methodNotAllowed: true } : null;
+    return allow.size ? { methodNotAllowed: true, allow: [...allow] } : null;
   }
+}
+
+// Rate-limit bucket for an address: IPv4 as is; IPv6 (also "::ffff:a.b.c.d" mapped IPv4) by its /64, because one
+// subscriber normally controls a whole /64 and could otherwise use a fresh address for every request.
+function ipBucket(raw) {
+  const ip = String(raw || '').split('%')[0].toLowerCase();
+  if (net.isIPv4(ip)) return ip;
+  if (!net.isIPv6(ip)) return ip || 'unknown';
+  const [head, tail] = ip.split('::');
+  const mapped = /^(?:0{0,4}:){0,5}ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip.replace('::', ':0:'));
+  if (mapped && net.isIPv4(mapped[1])) return mapped[1];
+  const toGroups = (part) =>
+    (part ? part.split(':') : []).flatMap((g) => {
+      if (!g.includes('.')) return [g];
+      const o = g.split('.').map(Number);
+      return [((o[0] << 8) | o[1]).toString(16), ((o[2] << 8) | o[3]).toString(16)];
+    });
+  const h = toGroups(head);
+  const t = tail === undefined ? [] : toGroups(tail);
+  const groups = tail === undefined ? h : [...h, ...Array(8 - h.length - t.length).fill('0'), ...t];
+  return `${groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':')}::/64`;
 }
 
 // Client address for rate limits. `trustedHeader` is only read when the app is told to trust it. On Vercel that is
 // `x-vercel-forwarded-for`: Vercel documents that it sets the client's public IP there (identical to
 // x-forwarded-for, but not overwritten by a proxy placed in front of Vercel) and does not forward external values.
 // If a list is ever present the right-most entry is used (the address the platform itself saw). Otherwise
-// (local runs, tests without the option) the socket address is used.
+// (local runs, tests without the option) the socket address is used. The result is an ipBucket().
 function clientIp(req, trustedHeader) {
   if (trustedHeader) {
     const parts = String(req.headers[trustedHeader] || '')
       .split(',')
       .map((x) => x.trim())
       .filter(Boolean);
-    if (parts.length) return parts[parts.length - 1].slice(0, 64);
+    if (parts.length) return ipBucket(parts[parts.length - 1].slice(0, 64));
   }
-  return req.socket.remoteAddress || 'unknown';
+  return ipBucket(req.socket.remoteAddress);
 }
 
-module.exports = { HttpError, Form, MAX_BODY_BYTES, readBody, readForm, createContext, Router, clientIp, SECURITY_HEADERS, securityHeaders };
+module.exports = { HttpError, Form, MAX_BODY_BYTES, readBody, readForm, createContext, Router, clientIp, ipBucket, SECURITY_HEADERS, securityHeaders };
