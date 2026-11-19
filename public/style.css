@@ -58,7 +58,7 @@
   --bg-soft: var(--field);
 
   /* type */
-  --font-head: "Arial Narrow", "Helvetica Neue Condensed", "Roboto Condensed", "Segoe UI", system-ui, sans-serif;
+  --font-head: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif; /* same family as body: no condensed faces, so headings look the same on every machine */
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --fs-xs: 0.8125rem;   /* 13 */
   --fs-sm: 0.9375rem;   /* 15 */
