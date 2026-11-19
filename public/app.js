@@ -2,6 +2,10 @@
 (function () {
   'use strict';
 
+  // Bring the apply form's error summary into view and focus.
+  var summary = document.getElementById('error-summary');
+  if (summary) summary.focus();
+
   // Ask before destructive actions.
   document.addEventListener('submit', function (e) {
     var btn = e.submitter;

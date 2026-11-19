@@ -72,7 +72,9 @@ transaction(db, () => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const event = db.prepare('INSERT INTO application_events (application_id, type, from_value, to_value, actor_user_id, at) VALUES (?, ?, ?, ?, ?, ?)');
-  const note = db.prepare('INSERT INTO notes (person_id, application_id, author_user_id, body, created_at) VALUES (?, ?, ?, ?, ?)');
+  const note = db.prepare(
+    'INSERT INTO notes (person_id, application_id, role_id, author_user_id, body, created_at) VALUES (?, ?, (SELECT role_id FROM applications WHERE id = ?), ?, ?, ?)'
+  );
 
   const roleQuestions = (id) => JSON.parse(db.prepare('SELECT questions_json FROM job_roles WHERE id = ?').get(id).questions_json);
   const answersFor = (id, texts) => JSON.stringify(roleQuestions(id).map((q, i) => ({ question: q.text, answer: texts[i] || '' })));
@@ -105,10 +107,10 @@ transaction(db, () => {
 
   const a1 = apply(p1, nfl, 12, { stages: [['reviewing', 10, rep1], ['trial', 6, rep1]], source: 'linkedin-nfl', answers: ['Lifelong Bears fan.', 'Four a week.'] });
   apply(p1, nba, 3, { heard: 'Referral', answers: ['My piece on the trade deadline.'] });
-  note.run(p1, a1, rep1, 'Strong first sample. Sent the trial brief.', iso(6));
+  note.run(p1, a1, a1, rep1, 'Strong first sample. Sent the trial brief.', iso(6));
   apply(p2, nfl, 9, { heard: 'Indeed', answers: ['I grew up in Chicago.', 'Three.'] });
   const a3 = apply(p3, mlb, 30, { stages: [['reviewing', 28, rep1], ['trial', 25, rep1], ['onboarded', 20, admin]], heard: 'FanSided site', answers: ['A shortstop in Double-A.'] });
-  note.run(p3, a3, admin, 'Onboarded; Voltax account created by hand.', iso(20));
+  note.run(p3, a3, a3, admin, 'Onboarded; Voltax account created by hand.', iso(20));
   apply(p4, nba, 1, { heard: 'X/Twitter', source: 'twitter-nba', answers: ['A breakdown of pick-and-roll defence.', 'The MVP race.'] });
 });
 

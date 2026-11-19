@@ -45,7 +45,7 @@ function dashboard(ctx) {
       </p>
       ${roles.length === 0
         ? html`<p class="muted">${showAll ? 'No roles yet.' : 'No roles are assigned to you.'} ${showAll ? '' : html`<a href="/app?view=all">See all roles</a>.`}</p>`
-        : html`<table class="data" id="roles-table">
+        : html`<div class="table-wrap"><table class="data" id="roles-table">
           <thead><tr><th>Role</th><th>Site</th><th>Status</th><th>Rep</th>${STAGES.map((s) => html`<th class="num">${STAGE_LABELS[s]}</th>`)}</tr></thead>
           <tbody>
             ${roles.map((r) => {
@@ -61,7 +61,7 @@ function dashboard(ctx) {
               </tr>`;
             })}
           </tbody>
-        </table>`}`,
+        </table></div>`}`,
   });
 }
 
@@ -94,7 +94,8 @@ function rolePipeline(ctx) {
         <form method="post" action="/app/roles/${role.id}/assign" class="inline">
           ${csrfField(ctx)}
           <label>Reassign rep
-            <select name="user_id">
+            <select name="user_id" required>
+              <option value=""${users.some((u) => u.id === role.assigned_user_id) ? '' : raw(' selected')}>Choose…</option>
               ${users.map((u) => html`<option value="${u.id}"${u.id === role.assigned_user_id ? raw(' selected') : ''}>${u.name || u.email}</option>`)}
             </select>
           </label>
@@ -107,7 +108,8 @@ function rolePipeline(ctx) {
           <h2>${STAGE_LABELS[stage]} <span class="count">${list.length}</span></h2>
           ${list.length === 0
             ? html`<p class="muted">No candidates.</p>`
-            : html`<table class="data pipeline">
+            : html`<div class="table-wrap"><table class="data pipeline">
+              <colgroup><col class="c-name"><col class="c-email"><col class="c-date"><col class="c-source"><col class="c-days"><col class="c-move"></colgroup>
               <thead><tr><th>Name</th><th>Email</th><th>Applied</th><th>Source</th><th class="num">Days in stage</th><th>Move to</th></tr></thead>
               <tbody>
                 ${list.map(
@@ -128,7 +130,7 @@ function rolePipeline(ctx) {
                   </tr>`
                 )}
               </tbody>
-            </table>`}
+            </table></div>`}
         </section>`;
       })}`,
   });
@@ -139,10 +141,10 @@ function reassign(ctx) {
   const roleId = idParam(ctx.params.id);
   const role = db.prepare('SELECT id FROM job_roles WHERE id = ?').get(roleId);
   if (!role) throw new HttpError(404, 'Role not found');
-  const userId = Number(ctx.form.get('user_id'));
+  const userId = Number(ctx.form.get('user_id')) || 0;
   const user = db.prepare('SELECT id, name, email FROM users WHERE id = ? AND active = 1').get(userId);
   if (!user) {
-    setFlash(ctx, 'error', 'Pick an active user.');
+    setFlash(ctx, 'error', 'Choose an active user to assign this role to.');
   } else {
     db.prepare('UPDATE job_roles SET assigned_user_id = ?, updated_at = ? WHERE id = ?').run(user.id, nowIso(), roleId);
     setFlash(ctx, 'ok', `Role reassigned to ${user.name || user.email}.`);

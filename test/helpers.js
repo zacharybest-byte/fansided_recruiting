@@ -8,7 +8,7 @@ const { nowIso } = require('../src/lib/db');
 
 let ipCounter = 1;
 
-async function startApp({ env = {}, dataDir, fetchImpl } = {}) {
+async function startApp({ env = {}, dataDir, fetchImpl, log } = {}) {
   const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'fsr-test-'));
   const app = createApp({
     env: {
@@ -24,7 +24,7 @@ async function startApp({ env = {}, dataDir, fetchImpl } = {}) {
       ...env,
     },
     fetchImpl,
-    log: () => {},
+    log: log || (() => {}),
   });
   const port = await app.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${port}`;
@@ -124,6 +124,10 @@ class Client {
     if (!('source' in fields)) {
       const m = /name="source" value="([^"]*)"/.exec(this.lastHtml);
       all.source = m ? m[1].replace(/&amp;/g, '&') : '';
+    }
+    if (!('qv' in fields)) {
+      const m = /name="qv" value="([0-9a-f]*)"/.exec(this.lastHtml);
+      all.qv = m ? m[1] : '';
     }
     for (const [k, v] of Object.entries(all)) if (v !== undefined) fd.append(k, v);
     if (file) fd.append('file', new Blob([file.data]), file.name);

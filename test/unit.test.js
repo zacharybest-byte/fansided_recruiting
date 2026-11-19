@@ -139,13 +139,17 @@ test('config: production requires secrets and refuses DEV_LOGIN', () => {
   assert.equal(c.timezone, 'America/New_York');
 });
 
-test('rate limiter allows 10 per hour per key', () => {
+test('rate limiter: 10 recorded submissions per hour per key; checking does not record', () => {
   const rl = createRateLimiter();
   const now = 1_000_000;
-  for (let i = 0; i < 10; i++) assert.ok(rl.hit('ip', now + i));
-  assert.ok(!rl.hit('ip', now + 11));
-  assert.ok(rl.hit('other', now));
-  assert.ok(rl.hit('ip', now + 60 * 60 * 1000 + 20)); // window has moved on
+  for (let i = 0; i < 50; i++) assert.ok(rl.allowed('ip', now)); // checks alone never use up the limit
+  for (let i = 0; i < 10; i++) {
+    assert.ok(rl.allowed('ip', now + i));
+    rl.record('ip', now + i);
+  }
+  assert.ok(!rl.allowed('ip', now + 11));
+  assert.ok(rl.allowed('other', now));
+  assert.ok(rl.allowed('ip', now + 60 * 60 * 1000 + 20)); // window has moved on
 });
 
 test('voltax.createUser is a stub that returns not_configured', async () => {

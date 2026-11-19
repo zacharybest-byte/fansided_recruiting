@@ -152,6 +152,126 @@ const MIGRATIONS = [
     ];
     for (const t of templates) insert.run(t[0], t[1], t[2], now);
   },
+  // 3: never reuse ids after deletes (AUTOINCREMENT), and record the role a note/email was written under.
+  //    Tables are rebuilt with the standard SQLite procedure (foreign keys are off during migrations).
+  `
+  CREATE TABLE people_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    linkedin_url TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO people_new (id, email, name, linkedin_url, created_at, updated_at)
+    SELECT id, email, name, linkedin_url, created_at, updated_at FROM people;
+
+  CREATE TABLE applications_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    role_id INTEGER NOT NULL REFERENCES job_roles(id),
+    stage TEXT NOT NULL DEFAULT 'new' CHECK (stage IN ('new','reviewing','trial','onboarded','passed')),
+    sample_links TEXT NOT NULL DEFAULT '',
+    file_path TEXT,
+    file_name TEXT,
+    answers_json TEXT NOT NULL DEFAULT '[]',
+    heard_from TEXT NOT NULL DEFAULT '',
+    source_tag TEXT NOT NULL DEFAULT '',
+    applied_at TEXT NOT NULL,
+    stage_changed_at TEXT NOT NULL,
+    onboarded_at TEXT,
+    voltax_user_id TEXT,
+    voltax_onboarded_on TEXT
+  );
+  INSERT INTO applications_new SELECT id, person_id, role_id, stage, sample_links, file_path, file_name, answers_json,
+    heard_from, source_tag, applied_at, stage_changed_at, onboarded_at, voltax_user_id, voltax_onboarded_on FROM applications;
+
+  CREATE TABLE application_events_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id),
+    type TEXT NOT NULL CHECK (type IN ('stage_change','role_change','voltax_recorded')),
+    from_value TEXT,
+    to_value TEXT,
+    actor_user_id INTEGER REFERENCES users(id),
+    at TEXT NOT NULL
+  );
+  INSERT INTO application_events_new SELECT id, application_id, type, from_value, to_value, actor_user_id, at FROM application_events;
+
+  CREATE TABLE notes_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    application_id INTEGER REFERENCES applications(id),
+    role_id INTEGER REFERENCES job_roles(id),
+    author_user_id INTEGER REFERENCES users(id),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  INSERT INTO notes_new (id, person_id, application_id, role_id, author_user_id, body, created_at)
+    SELECT n.id, n.person_id, n.application_id, a.role_id, n.author_user_id, n.body, n.created_at
+      FROM notes n LEFT JOIN applications a ON a.id = n.application_id;
+
+  CREATE TABLE email_templates_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO email_templates_new SELECT id, name, subject, body, updated_at FROM email_templates;
+
+  CREATE TABLE emails_sent_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    application_id INTEGER REFERENCES applications(id),
+    role_id INTEGER REFERENCES job_roles(id),
+    template_id INTEGER REFERENCES email_templates(id) ON DELETE SET NULL,
+    sender_user_id INTEGER REFERENCES users(id),
+    to_email TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    gmail_message_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('sent','failed')),
+    error TEXT,
+    sent_at TEXT NOT NULL
+  );
+  INSERT INTO emails_sent_new (id, person_id, application_id, role_id, template_id, sender_user_id, to_email, subject, body,
+      gmail_message_id, status, error, sent_at)
+    SELECT m.id, m.person_id, m.application_id, a.role_id, m.template_id, m.sender_user_id, m.to_email, m.subject, m.body,
+      m.gmail_message_id, m.status, m.error, m.sent_at
+      FROM emails_sent m LEFT JOIN applications a ON a.id = m.application_id;
+
+  CREATE TABLE deletion_log_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deleted_person_id INTEGER NOT NULL,
+    actor_user_id INTEGER REFERENCES users(id),
+    at TEXT NOT NULL
+  );
+  INSERT INTO deletion_log_new SELECT id, deleted_person_id, actor_user_id, at FROM deletion_log;
+
+  DROP TABLE emails_sent;
+  DROP TABLE notes;
+  DROP TABLE application_events;
+  DROP TABLE applications;
+  DROP TABLE people;
+  DROP TABLE email_templates;
+  DROP TABLE deletion_log;
+  ALTER TABLE people_new RENAME TO people;
+  ALTER TABLE applications_new RENAME TO applications;
+  ALTER TABLE application_events_new RENAME TO application_events;
+  ALTER TABLE notes_new RENAME TO notes;
+  ALTER TABLE email_templates_new RENAME TO email_templates;
+  ALTER TABLE emails_sent_new RENAME TO emails_sent;
+  ALTER TABLE deletion_log_new RENAME TO deletion_log;
+
+  CREATE INDEX applications_role ON applications(role_id);
+  CREATE INDEX applications_person ON applications(person_id);
+  CREATE INDEX applications_applied ON applications(applied_at);
+  CREATE INDEX events_application ON application_events(application_id);
+  CREATE INDEX notes_person ON notes(person_id);
+  CREATE INDEX emails_person ON emails_sent(person_id);
+  CREATE TRIGGER application_events_no_update BEFORE UPDATE ON application_events
+  BEGIN SELECT RAISE(ABORT, 'application_events is append-only'); END;
+  `,
 ];
 
 function openDb(dataDir) {
@@ -164,13 +284,23 @@ function openDb(dataDir) {
 
 function migrate(db) {
   const current = db.prepare('PRAGMA user_version').get().user_version;
-  for (let i = current; i < MIGRATIONS.length; i++) {
-    const step = MIGRATIONS[i];
-    transaction(db, () => {
-      if (typeof step === 'function') step(db);
-      else db.exec(step);
-      db.exec(`PRAGMA user_version = ${i + 1}`);
-    });
+  if (current >= MIGRATIONS.length) return { from: current, to: current };
+  // Foreign keys are switched off while tables are rebuilt (this cannot be done inside a
+  // transaction), and checked before each migration commits.
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    for (let i = current; i < MIGRATIONS.length; i++) {
+      const step = MIGRATIONS[i];
+      transaction(db, () => {
+        if (typeof step === 'function') step(db);
+        else db.exec(step);
+        const broken = db.prepare('PRAGMA foreign_key_check').all();
+        if (broken.length) throw new Error(`Migration ${i + 1} left ${broken.length} broken foreign key(s)`);
+        db.exec(`PRAGMA user_version = ${i + 1}`);
+      });
+    }
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
   }
   return { from: current, to: MIGRATIONS.length };
 }

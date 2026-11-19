@@ -23,13 +23,13 @@ function templatesPage(ctx) {
     title: 'Email templates',
     body: html`<h1>Email templates</h1>
       <p><a href="/app/admin/templates/new" class="button">New template</a></p>
-      <table class="data"><thead><tr><th>Name</th><th>Subject</th><th>Updated</th><th></th></tr></thead><tbody>
+      <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Subject</th><th>Updated</th><th></th></tr></thead><tbody>
         ${templates.map(
           (t) => html`<tr><td><a href="/app/admin/templates/${t.id}">${t.name}</a></td><td>${t.subject}</td><td>${fmtDate(ctx, t.updated_at)}</td>
             <td><form method="post" action="/app/admin/templates/${t.id}/delete" class="inline">${csrfField(ctx)}
               <button type="submit" class="link danger" data-confirm="Delete this template?">Delete</button></form></td></tr>`
         )}
-      </tbody></table>
+      </tbody></table></div>
       ${mergeFieldHelp()}`,
   });
 }
@@ -89,13 +89,13 @@ function rolesPage(ctx) {
     title: 'Roles',
     body: html`<h1>Roles</h1>
       <p><a href="/app/admin/roles/new" class="button">New role</a></p>
-      <table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th></tr></thead><tbody>
+      <div class="table-wrap"><table class="data"><thead><tr><th>Title</th><th>Vertical</th><th>Site</th><th>Status</th><th>Rep</th><th class="num">Candidates</th></tr></thead><tbody>
         ${roles.map(
           (r) => html`<tr><td><a href="/app/admin/roles/${r.id}">${r.title}</a></td><td>${r.vertical}</td><td>${r.site_name}</td>
             <td><span class="status status-${r.status}">${r.status}</span></td><td>${r.rep_name || r.rep_email || ''}</td>
             <td class="num"><a href="/app/roles/${r.id}">${r.n}</a></td></tr>`
         )}
-      </tbody></table>`,
+      </tbody></table></div>`,
   });
 }
 
@@ -199,11 +199,14 @@ function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
     title: 'Users',
     status,
     body: html`<h1>Users</h1>
-      <table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th></th></tr></thead><tbody>
+      <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="num">Roles assigned</th><th></th></tr></thead><tbody>
         ${users.map(
           (u) => html`<tr class="${u.active ? '' : 'inactive'}" data-user-id="${u.id}">
-            <td>${u.name}</td><td>${u.email}</td>
-            <td><form method="post" action="/app/admin/users/${u.id}/role" class="inline">${csrfField(ctx)}
+            <td><form method="post" action="/app/admin/users/${u.id}/name" class="inline nowrap">${csrfField(ctx)}
+              <input type="text" name="name" value="${u.name}" maxlength="200" required aria-label="Display name for ${u.email}" placeholder="Display name">
+              <button type="submit">Save</button></form></td>
+            <td class="wrap">${u.email}</td>
+            <td><form method="post" action="/app/admin/users/${u.id}/role" class="inline nowrap">${csrfField(ctx)}
               <select name="role" aria-label="Role">
                 <option value="rep"${u.role === 'rep' ? raw(' selected') : ''}>Rep</option>
                 <option value="admin"${u.role === 'admin' ? raw(' selected') : ''}>Admin</option>
@@ -211,11 +214,11 @@ function usersPage(ctx, { errors = {}, values = {}, status = 200 } = {}) {
             <td>${u.active ? 'Active' : 'Deactivated'}</td>
             <td class="num">${u.role_count}</td>
             <td>${u.active
-              ? html`<form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link danger">Deactivate</button></form>`
+              ? html`<form method="post" action="/app/admin/users/${u.id}/deactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link danger" data-confirm="Deactivate ${u.name || u.email}? They will be signed out and can no longer sign in.">Deactivate</button></form>`
               : html`<form method="post" action="/app/admin/users/${u.id}/reactivate" class="inline">${csrfField(ctx)}<button type="submit" class="link">Reactivate</button></form>`}</td>
           </tr>`
         )}
-      </tbody></table>
+      </tbody></table></div>
       <h2>Add a user</h2>
       <form method="post" action="/app/admin/users" class="stacked narrow">
         ${csrfField(ctx)}
@@ -309,6 +312,18 @@ function register(router) {
     if (Object.keys(errors).length) return usersPage(ctx, { errors, values, status: 400 });
     db.prepare('INSERT INTO users (email, name, role, active, created_at) VALUES (?, ?, ?, 1, ?)').run(values.email, values.name, values.role, nowIso());
     setFlash(ctx, 'ok', `Added ${values.email}.`);
+    ctx.redirect('/app/admin/users');
+  });
+  router.post('/app/admin/users/:id/name', ...AP, (ctx) => {
+    const { db } = ctx.app;
+    const u = getUser(db, ctx.params.id);
+    const name = ctx.form.get('name').replace(/\s+/g, ' ').trim();
+    if (!name || name.length > 200) {
+      setFlash(ctx, 'error', 'A display name is required (up to 200 characters).');
+    } else {
+      db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, u.id);
+      setFlash(ctx, 'ok', `Name saved for ${u.email}.`);
+    }
     ctx.redirect('/app/admin/users');
   });
   router.post('/app/admin/users/:id/role', ...AP, (ctx) => {

@@ -1,0 +1,26 @@
+# /etc/systemd/system/fansided-recruit.service
+# Runs the app container only when the persistent data disk is mounted, so it can never
+# start on an empty directory and create a fresh database there.
+[Unit]
+Description=FanSided Recruit
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/recruit
+# Marker file created once on the real disk (see README); refuses to start without it.
+ConditionPathExists=/mnt/recruit/.recruit-data-disk
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f recruit
+ExecStart=/usr/bin/docker run --rm --name recruit \
+  --env-file /etc/fansided-recruit.env \
+  -v /mnt/recruit:/data \
+  -p 127.0.0.1:3000:3000 \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
+  fansided-recruit:current
+ExecStop=/usr/bin/docker stop -t 20 recruit
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

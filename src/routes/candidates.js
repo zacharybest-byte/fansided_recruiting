@@ -56,8 +56,7 @@ function candidatePage(ctx) {
       `SELECT n.*, u.name AS author_name, u.email AS author_email, r.title AS role_title
          FROM notes n
          LEFT JOIN users u ON u.id = n.author_user_id
-         LEFT JOIN applications a ON a.id = n.application_id
-         LEFT JOIN job_roles r ON r.id = a.role_id
+         LEFT JOIN job_roles r ON r.id = n.role_id
         WHERE n.person_id = ? ORDER BY n.created_at DESC, n.id DESC`
     )
     .all(person.id);
@@ -72,8 +71,7 @@ function candidatePage(ctx) {
       `SELECT m.*, u.name AS sender_name, u.email AS sender_email, r.title AS role_title
          FROM emails_sent m
          LEFT JOIN users u ON u.id = m.sender_user_id
-         LEFT JOIN applications a ON a.id = m.application_id
-         LEFT JOIN job_roles r ON r.id = a.role_id
+         LEFT JOIN job_roles r ON r.id = m.role_id
         WHERE m.person_id = ? ORDER BY m.sent_at DESC, m.id DESC`
     )
     .all(person.id);
@@ -126,7 +124,7 @@ function candidatePage(ctx) {
             <p><button type="submit">Save stage</button></p>
           </form>
           ${app.stage === 'onboarded'
-            ? html`<h3>Voltax</h3>
+            ? html`<h3 id="voltax">Voltax</h3>
               <p>User ID: ${app.voltax_user_id || html`<span class="muted">not recorded</span>`}
                  · Onboarded on: ${app.voltax_onboarded_on || html`<span class="muted">not recorded</span>`}</p>
               <form method="post" action="/app/applications/${app.id}/voltax" class="inline">
@@ -168,10 +166,10 @@ function candidatePage(ctx) {
           <h2>History</h2>
           ${history.length === 0
             ? html`<p class="muted">No other applications.</p>`
-            : html`<table class="data"><thead><tr><th>Role</th><th>Applied</th><th>Stage</th></tr></thead><tbody>
+            : html`<div class="table-wrap"><table class="data"><thead><tr><th>Role</th><th>Applied</th><th>Stage</th></tr></thead><tbody>
               ${history.map(
                 (h) => html`<tr><td><a href="/app/applications/${h.id}">${h.role_title}</a></td><td>${fmtDate(ctx, h.applied_at)}</td><td>${STAGE_LABELS[h.stage]}</td></tr>`
-              )}</tbody></table>`}
+              )}</tbody></table></div>`}
         </section>
       </div>
 
@@ -297,6 +295,10 @@ async function changeStage(ctx) {
     }
   }
   setFlash(ctx, 'ok', message);
+  // Onboarded from the pipeline row (no Voltax fields there): go to the candidate's Voltax form.
+  if (stage === 'onboarded' && !voltaxId && back !== `/app/applications/${id}`) {
+    return ctx.redirect(`/app/applications/${id}#voltax`);
+  }
   ctx.redirect(back);
 }
 
@@ -350,8 +352,8 @@ function addNote(ctx) {
   if (!body || body.length > 5000) {
     setFlash(ctx, 'error', 'A note must be between 1 and 5,000 characters.');
   } else {
-    db.prepare('INSERT INTO notes (person_id, application_id, author_user_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run(
-      app.person_id, app.id, ctx.user.id, body, nowIso()
+    db.prepare('INSERT INTO notes (person_id, application_id, role_id, author_user_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      app.person_id, app.id, app.role_id, ctx.user.id, body, nowIso()
     );
     setFlash(ctx, 'ok', 'Note added.');
   }

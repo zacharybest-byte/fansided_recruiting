@@ -76,7 +76,7 @@ function createMailer({ db, config, google, log }) {
         const r = db
           .prepare('INSERT INTO dev_mail_log (from_user_id, from_email, to_email, subject, body, at) VALUES (?, ?, ?, ?, ?, ?)')
           .run(sender.id, sender.email, to, subject, body, nowIso());
-        log(`[email:log] from=${sender.email} to=${to} subject=${JSON.stringify(subject)}`);
+        log(config.production ? `[email:log] #${r.lastInsertRowid} from user ${sender.id}` : `[email:log] from=${sender.email} to=${to} subject=${JSON.stringify(subject)}`);
         return { messageId: `log-${r.lastInsertRowid}` };
       }
       const row = db.prepare('SELECT google_refresh_token_enc FROM users WHERE id = ?').get(sender.id);
@@ -112,12 +112,12 @@ function createMailer({ db, config, google, log }) {
       } catch (err) {
         status = 'failed';
         error = String(err.message || err).slice(0, 1000);
-        log(`[email] send failed from ${sender.email}: ${error}`);
+        log(`[email] send failed for application ${application.id} from user ${sender.id}: ${error}`);
       }
       db.prepare(
-        `INSERT INTO emails_sent (person_id, application_id, template_id, sender_user_id, to_email, subject, body,
-           gmail_message_id, status, error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(person.id, application.id, templateId || null, sender.id, person.email, subject, body, messageId, status, error, nowIso());
+        `INSERT INTO emails_sent (person_id, application_id, role_id, template_id, sender_user_id, to_email, subject, body,
+           gmail_message_id, status, error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(person.id, application.id, application.role_id, templateId || null, sender.id, person.email, subject, body, messageId, status, error, nowIso());
       return { ok: status === 'sent', error };
     },
 
@@ -132,7 +132,7 @@ function createMailer({ db, config, google, log }) {
       const admin = db.prepare("SELECT * FROM users WHERE role = 'admin' AND active = 1 ORDER BY id LIMIT 1").get();
       const recipient = rep || admin;
       if (!recipient) {
-        log(`[notify] no rep or admin to notify: ${subject} ${link}`);
+        log(`[notify] no rep or admin to notify about application ${applicationId}`);
         return { sent: false };
       }
       const senders = [rep, admin].filter((u, i, a) => u && a.findIndex((x) => x && x.id === u.id) === i);
@@ -141,10 +141,10 @@ function createMailer({ db, config, google, log }) {
           await mailer.deliver(sender, { to: recipient.email, subject, body });
           return { sent: true, to: recipient.email, via: sender.email };
         } catch (err) {
-          log(`[notify] sending as ${sender.email} failed: ${err.message}`);
+          log(`[notify] application ${applicationId}: sending as user ${sender.id} failed: ${err.message}`);
         }
       }
-      log(`[notify] NOT SENT to ${recipient.email}: ${subject} ${link}`);
+      log(`[notify] NOT SENT for application ${applicationId} (rep user ${recipient.id}): ${link}`);
       return { sent: false };
     },
   };

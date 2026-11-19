@@ -109,3 +109,23 @@ ol.events { padding-left: 1.2rem; }
 .email-failed summary { color: var(--danger); }
 .role-header { background: var(--bg-soft); padding: 0.5rem 0.8rem; border-radius: 6px; }
 .toolbar { margin: 0 0 0.5rem; }
+
+/* Wide tables scroll sideways on small screens instead of overflowing the page. */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0.5rem 0 1rem; }
+.table-wrap table.data { margin: 0; }
+table.data td { overflow-wrap: anywhere; }
+table.data td.wrap { word-break: break-all; }
+.nowrap, form.inline.nowrap { flex-wrap: nowrap; white-space: nowrap; }
+form.inline.nowrap input[type=text] { min-width: 10rem; }
+#error-summary p { margin: 0.2rem 0; }
+#error-summary:focus { outline: 2px solid var(--danger); outline-offset: 2px; }
+
+/* Pipeline: every stage table uses the same column widths. */
+table.pipeline { table-layout: fixed; min-width: 760px; }
+table.pipeline col.c-name { width: 20%; }
+table.pipeline col.c-email { width: 24%; }
+table.pipeline col.c-date { width: 11%; }
+table.pipeline col.c-source { width: 14%; }
+table.pipeline col.c-days { width: 9%; }
+table.pipeline col.c-move { width: 22%; }
+table.pipeline form.inline { flex-wrap: nowrap; }

@@ -1,6 +1,7 @@
 'use strict';
 // Public pages: openings list, role page + apply form, thanks.
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const { html, multiline } = require('../lib/render');
 const { page, HEARD_FROM } = require('../lib/layout');
@@ -21,16 +22,20 @@ const RATE_WINDOW_MS = 60 * 60 * 1000;
 
 function createRateLimiter(limit = RATE_LIMIT, windowMs = RATE_WINDOW_MS) {
   const hits = new Map();
+  const recent = (key, now) => (hits.get(key) || []).filter((t) => now - t < windowMs);
   return {
-    // Records one attempt and returns false when the caller is over the limit.
-    hit(key, now = Date.now()) {
-      const recent = (hits.get(key) || []).filter((t) => now - t < windowMs);
-      recent.push(now);
-      hits.set(key, recent);
+    // True while the caller has fewer than `limit` recorded submissions in the window.
+    allowed(key, now = Date.now()) {
+      return recent(key, now).length < limit;
+    },
+    // Records one submission (only stored applications and honeypot hits are recorded).
+    record(key, now = Date.now()) {
+      const list = recent(key, now);
+      list.push(now);
+      hits.set(key, list);
       if (hits.size > 10000) {
         for (const [k, v] of hits) if (!v.some((t) => now - t < windowMs)) hits.delete(k);
       }
-      return recent.length <= limit;
     },
     reset() {
       hits.clear();
@@ -49,6 +54,12 @@ function sourceSuffix(source) {
 
 function cleanSource(value) {
   return String(value || '').trim().slice(0, LIMITS.source);
+}
+
+// Short fingerprint of a role's questionnaire. The form carries it so answers are never
+// matched to questions that changed while the applicant was typing.
+function questionsVersion(role) {
+  return crypto.createHash('sha256').update(role.questions_json || '[]').digest('hex').slice(0, 16);
 }
 
 function getRole(db, id) {
@@ -115,10 +126,16 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
       <p class="muted">${role.vertical}${role.site_name ? ` · ${role.site_name}` : ''}</p>
       ${multiline(role.description)}
       <h2 id="apply">Apply</h2>
-      ${hasErrors ? html`<p class="flash flash-error">Please fix the highlighted fields below.${errors.file ? '' : ' If you attached a file, please choose it again.'}</p>` : ''}
-      <form method="post" action="/roles/${role.id}/apply" enctype="multipart/form-data" class="stacked" novalidate>
+      ${hasErrors
+        ? html`<div class="flash flash-error" id="error-summary" tabindex="-1" role="alert">
+            ${errors._questions ? html`<p>${errors._questions}</p>` : html`<p>Please fix the highlighted fields below.</p>`}
+            ${errors.file ? '' : html`<p>If you attached a file, please choose it again.</p>`}
+          </div>`
+        : ''}
+      <form method="post" action="/roles/${role.id}/apply#apply" enctype="multipart/form-data" class="stacked" novalidate>
         ${publicField(ctx)}
         <input type="hidden" name="source" value="${source}">
+        <input type="hidden" name="qv" value="${questionsVersion(role)}">
         <div class="hp" aria-hidden="true">
           <label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label>
         </div>
@@ -237,7 +254,7 @@ async function applySubmit(ctx) {
   const role = getRole(db, ctx.params.id);
   if (!role || role.status !== 'open') return closedPage(ctx);
 
-  if (!ctx.app.applyLimiter.hit(ctx.ip)) {
+  if (!ctx.app.applyLimiter.allowed(ctx.ip)) {
     return page(ctx, {
       title: 'Too many submissions',
       status: 429,
@@ -248,10 +265,21 @@ async function applySubmit(ctx) {
   const form = await readForm(ctx.req, config.maxBodyBytes);
   verifyPublic(ctx, form);
 
-  // Honeypot: pretend it worked, save nothing.
-  if (form.get('website').trim()) return ctx.redirect('/thanks');
+  // Honeypot: pretend it worked, save nothing (still counts towards the rate limit).
+  if (form.get('website').trim()) {
+    ctx.app.applyLimiter.record(ctx.ip);
+    return ctx.redirect('/thanks');
+  }
 
   const { errors, values, clean } = validate(form, role, config.maxUploadBytes);
+  if (form.get('qv') !== questionsVersion(role)) {
+    // The questionnaire changed after the form was loaded: show the current questions, keep the rest.
+    return applyFormPage(ctx, role, {
+      values: { ...values, answers: [] },
+      errors: { _questions: 'The questions for this role have changed since you opened the form. Please review your answers below and submit again.' },
+      status: 409,
+    });
+  }
   if (Object.keys(errors).length) return applyFormPage(ctx, role, { values, errors, status: 400 });
 
   let storedPath = null;
@@ -305,6 +333,7 @@ async function applySubmit(ctx) {
     throw err;
   }
 
+  ctx.app.applyLimiter.record(ctx.ip);
   try {
     await mailer.notifyNewApplication({ role, person, applicationId });
   } catch (err) {
@@ -321,6 +350,11 @@ function register(router) {
     applyFormPage(ctx, role);
   });
   router.post('/roles/:id/apply', applySubmit);
+  // Reloading or bookmarking the form's action URL lands back on the role page.
+  router.get('/roles/:id/apply', (ctx) => {
+    const source = cleanSource(ctx.query.get('source'));
+    ctx.redirect(`/roles/${encodeURIComponent(ctx.params.id)}${sourceSuffix(source)}`);
+  });
   router.post('/roles/:id', applySubmit);
   router.get('/thanks', (ctx) =>
     page(ctx, {

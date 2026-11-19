@@ -79,7 +79,7 @@ async function googleCallback(ctx) {
 
   const { user, reason } = checkAllowed(db, config, info);
   if (!user) {
-    log(`[auth] refused sign-in for ${info.email}: ${reason}`);
+    log(`[auth] refused a Google sign-in: ${reason}`);
     return loginPage(ctx, { error: NOT_AUTHORISED, status: 403 });
   }
 

@@ -1,5 +1,63 @@
 # v1 build notes: stubs, interpretations and test coverage
 
+## 1.1.0 (fixes from independent QA)
+
+Tests for these are in `test/qa-fixes.test.js`.
+
+- **Ids are never reused (major).** Migration 3 rebuilds `people`, `applications`,
+  `application_events`, `notes`, `email_templates`, `emails_sent` and `deletion_log`
+  with `INTEGER PRIMARY KEY AUTOINCREMENT`, keeping all data, foreign keys, indexes and
+  the append-only trigger. Migrations now run with foreign keys off and are checked with
+  `PRAGMA foreign_key_check` before each commits. Before this, deleting the newest
+  candidate let the next applicant take the same ids, so old notification links and
+  `deletion_log.deleted_person_id` could point at a different live person.
+- **Notes and emails keep their role.** Migration 3 also adds `notes.role_id` and
+  `emails_sent.role_id`, filled at write time (existing rows are backfilled from the
+  application's role at migration time). The candidate page tags notes and emails with
+  that role, not the application's current role.
+- **Apply form:**
+  - `GET /roles/:id/apply`, which happens when someone reloads a page that showed
+    validation errors, now redirects to the role page instead of returning 405.
+  - The form posts to `…/apply#apply`, and the error summary (`#error-summary`) gets
+    keyboard focus.
+  - The form carries a fingerprint of the questionnaire (`qv`). If an admin changed the
+    questions after the form was opened, the submission is not stored. The form comes
+    back with the current questions and the message "questions changed, please review"
+    (HTTP 409). The other fields are kept; answers are cleared.
+- **Rate limit:** only stored applications and honeypot hits count towards 10 per IP per
+  hour. Invalid submissions and CSRF failures no longer use up an applicant's quota.
+- **Reassign rep:** the select has a "Choose…" option. It is pre-selected when the role
+  has no active rep, and a choice is required.
+- **Layout:** tables scroll sideways on small screens (`.table-wrap`), long unbroken text
+  wraps, pipeline stage tables share column widths, and Users admin forms no longer wrap
+  awkwardly.
+- **Users admin:** admins can edit any user's display name, which matters because bootstrap
+  admins start with none. Deactivate asks for confirmation with JS, as well as showing
+  the server-side warning when the user still has roles.
+- **Pipeline → Onboarded:** a move to Onboarded from a pipeline row (which has no Voltax
+  fields) redirects to the candidate page's Voltax form (`#voltax`).
+- **Logs:** notification and email log lines carry application and user ids only, never
+  applicant names or emails. The exception is EMAIL_MODE=log outside production, which
+  prints notification subjects for local debugging. Refused sign-ins no longer log the
+  email address. The README has a new *Data retention* section listing the copies that
+  outlive *Delete candidate* (DB snapshots, reps' Gmail, container logs, `dev_mail_log`)
+  and how to purge each.
+- **Ops:**
+  - `npm start`, `npm run dev` and `npm run seed` load `.env` if present
+    (`--env-file-if-exists`, verified on Node 22.23).
+  - The VM deploy now uses a systemd unit (`deploy/fansided-recruit.service`) with
+    `RequiresMountsFor` plus a marker-file condition, so the app never starts on an
+    empty disk. The unit replaces `--restart=always` and sets Docker log rotation
+    (5 × 10 MB).
+  - Images are tagged with the git SHA and `current`; the README documents rollback.
+  - Backups use `deploy/backup-to-gcs.sh` (`set -euo pipefail`, logs every step, a
+    `$BUCKET` variable, a disk check, and an uploads mirror that removes deleted files).
+    The lifecycle rule only applies to `db/`. The README adds the IAM binding for the
+    VM's service account, the note that the *Internal* OAuth audience needs the project
+    to be in the Workspace org, and the Workspace *API controls → Trusted* step.
+
+## 1.0.0 (first build)
+
 ## 1.0.0 (first build)
 
 Everything in `docs/SPEC.md` is implemented. This file lists what is stubbed, where the
@@ -34,16 +92,16 @@ spec left room and a choice was made, and which acceptance checks are not fully 
 
 | Area | Decision |
 |---|---|
-| Schema | Extra table `dev_mail_log`, only written when `EMAIL_MODE=log`. A SQLite trigger refuses any `UPDATE` on `application_events`, so the log is append-only at the database level. `DELETE` is still allowed for candidate deletion. |
+| Schema | Extra columns `notes.role_id` and `emails_sent.role_id` (1.1.0). Extra table `dev_mail_log`, only written when `EMAIL_MODE=log`. A SQLite trigger refuses any `UPDATE` on `application_events`, so the log is append-only at the database level. `DELETE` is still allowed for candidate deletion. |
 | Env vars | Added `DEV_LOGIN`, `EMAIL_MODE`, `TRUST_PROXY` (number of reverse proxies, used to read the client IP for the rate limit) and `QUIET` (silences logs, for tests). |
 | Voltax entry | Besides the fields on the Change stage form, an already-Onboarded candidate has a small **Record Voltax** form, for when the ID is only known later. Saving it adds a `voltax_recorded` event. The Voltax fields on the stage form are always visible without JS. With JS, they show only when Onboarded is picked. |
-| Pipeline quick move | Moving a candidate to Onboarded from the pipeline row works and calls `voltax.createUser`, but it has no Voltax fields. Those are entered on the candidate page. |
+| Pipeline quick move | Moving a candidate to Onboarded from the pipeline row works and calls `voltax.createUser`, then redirects to the candidate page's Voltax form (1.1.0). |
 | Event values | `role_change` stores `from_value` and `to_value` as `"Role title (#id)"`. `voltax_recorded` stores `"<voltax id> (onboarded YYYY-MM-DD)"`. |
 | Notifications | If a role has no assigned rep, or the rep is deactivated, the notification goes to the first active admin. A rep's revoked refresh token (`invalid_grant`) is cleared, so later notifications use the admin's token straight away. |
 | Sign-in | Google only returns a refresh token on first consent. If a rep signs in and the app has no usable token for them, the app sends them back to Google once with `prompt=consent`. If the rep unticks the Gmail permission, sign-in still works and they see a warning. |
 | Admin guards | As well as refusing to deactivate yourself or the last active admin, the app refuses to **demote** the last active admin. The deactivation warning lists every role still assigned to the user, open or closed. |
 | Bootstrap admins | `ADMIN_EMAILS` are upserted as active admins on every start. To deactivate one permanently, remove them from `ADMIN_EMAILS` first. |
-| Apply form | "How did you hear about us?" is optional. If given, it must be one of the six options. Each writing-sample line must be an http(s) URL; a bare `example.com/post` gets `https://` added. Whitespace and newlines in the name are collapsed. The rate limit counts every POST to the apply endpoint, including invalid ones and honeypot hits. It is in memory and resets on restart. |
+| Apply form | "How did you hear about us?" is optional. If given, it must be one of the six options. Each writing-sample line must be an http(s) URL; a bare `example.com/post` gets `https://` added. Whitespace and newlines in the name are collapsed. The rate limit counts stored applications and honeypot hits only (1.1.0). It is in memory and resets on restart. A questionnaire fingerprint guards against answers landing on changed questions (1.1.0). |
 | Closed or unknown role | Returns the "This role is no longer open" page with HTTP 404. |
 | Oversized upload | A body over `MAX_UPLOAD_MB` + 1 MB gets 413 and a plain "file too large" page. A file over the limit but under the body cap gets a field error on the re-shown form. |
 | Email composer | **Load** is a plain GET (`?template=ID`), so it works without JS. The rep can edit the subject and body before sending. |
