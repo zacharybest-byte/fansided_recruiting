@@ -63,3 +63,23 @@ The build sandbox had no network. Verified only against local fakes and the Verc
 - Gmail compose URL with very long bodies; Google Chat and Slack webhook acceptance of the `{"text": ...}` payload.
 - Turso: `db.batch` has never run on a real server, a batch must finish inside Turso's ~5 s transaction window (client timeout 8 s), and `test/fake-turso.js` is our own reading of the docs, so it may deviate.
 - Logs: Vercel and Turso platform logs may record the `/setup?token=` and `/set-password?token=` query strings. Remove `SETUP_TOKEN` after setup; invite and reset links are single-use.
+
+## Brand assets
+
+The official FanSided brand kit (July 2026) is applied through CSS custom properties at the top of `public/style.css`
+(FanSided Blue `#062f4d`, Yeti Blue `#5A97C1`, Black `#111111`, Gray `#999999`, White `#F6F6F6`).
+
+- **Logo**: `public/logo.png` (368 x 96, generated from the supplied `fansided-primary-wordmark.png`, 6906 x 1800).
+  It is only ever scaled proportionally (CSS sets the height, the width stays auto). To swap it, make a new PNG that is
+  96 px tall with the same transparent-background wordmark, update the `width`/`height` attributes in `src/lib/layout.js`
+  (`logoImg`) and the dimensions in `test/brand.test.js` if the aspect ratio changes, then run `node scripts/embed-assets.js`.
+- **Favicon**: `public/favicon.svg` is a placeholder (white block F on a FanSided Blue rounded square).
+- **Fonts**: headlines Public Sans Black (900), body Public Sans Medium (500). Drop `PublicSans-Black.woff2` (or `.ttf`) and
+  `PublicSans-Medium.woff2` (or `.ttf`) into `public/fonts/`, then run `node scripts/embed-assets.js`. The `@font-face`
+  blocks in `public/style.css` already point at those names (with `local()` first and `font-display: swap`). Until the files
+  exist the requests 404 quietly and the system font stack is used (headings 800, body 400). Bold text (700) resolves to the
+  Black face when it is present, because only Black and Medium are loaded.
+- **Embedding**: `scripts/embed-assets.js` writes `src/lib/assets.generated.js`, which carries the CSS, JS and SVG as text and
+  the logo and fonts as base64, so everything is served on Vercel even if `public/` is not bundled with the function. A test
+  fails if the embedded copy differs from `public/`.
+- The Content-Security-Policy allows `font-src 'self'` and `img-src 'self'` only: no external fonts or images.

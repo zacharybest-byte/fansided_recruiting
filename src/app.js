@@ -11,22 +11,29 @@ const { loadSession, requireAdmin } = require('./lib/auth');
 const { errorPage } = require('./lib/layout');
 const { dummyHash } = require('./lib/password');
 
-const STATIC_TYPES = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.png': 'image/png' };
+const STATIC_TYPES = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.ttf': 'font/ttf' };
 
 // Assets are read from public/ when the files are present (local runs), otherwise from the embedded copy in
 // src/lib/assets.generated.js, so they are always served whatever Vercel bundles with the function.
 function loadStatic() {
   const embedded = require('./lib/assets.generated');
   const files = new Map();
-  for (const name of Object.keys(embedded)) {
-    let data;
+  const read = (name, fallback) => {
     try {
-      data = fs.readFileSync(path.join(__dirname, '..', 'public', name));
+      return fs.readFileSync(path.join(__dirname, '..', 'public', name));
     } catch {
-      data = Buffer.from(embedded[name]);
+      return fallback();
     }
+  };
+  for (const name of Object.keys(embedded)) {
+    if (name === '__binary') continue;
+    const data = read(name, () => Buffer.from(embedded[name]));
     files.set(`/public/${name}`, { data, type: STATIC_TYPES[path.extname(name)] });
     if (name === 'favicon.svg') files.set('/favicon.ico', { data, type: STATIC_TYPES['.svg'] });
+  }
+  // Binary files (logo, fonts) are embedded as base64 and decoded to Buffers.
+  for (const [name, b64] of Object.entries(embedded.__binary || {})) {
+    files.set(`/public/${name}`, { data: read(name, () => Buffer.from(b64, 'base64')), type: STATIC_TYPES[path.extname(name)] });
   }
   return files;
 }

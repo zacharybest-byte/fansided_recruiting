@@ -179,7 +179,7 @@ formula guard, RFC 4180), templates and merge fields, delete candidate. Timezone
 - Escape-by-default templating. User URLs are rendered as links only when `https:`; all external links
   carry `rel="noopener noreferrer"`.
 - Headers on **every** response (pages, errors, static files, redirects):
-  `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+  `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
   `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and in
   production `Strict-Transport-Security: max-age=63072000; includeSubDomains`. Internal and token pages:
   `Cache-Control: no-store`.

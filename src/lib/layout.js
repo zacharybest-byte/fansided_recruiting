@@ -59,7 +59,10 @@ const NAV_LABELS = {
   '/app/admin/sample': 'Sample data',
 };
 
-const wordmark = (href, tag, extra = '') => html`<a href="${href}" class="wordmark${extra}">FanSided${tag ? html`<span class="wordmark-tag">${tag}</span>` : ''}</a>`;
+// The official wordmark (public/logo.png, 368x96 = the source file's 6906x1800 ratio). Only scaled proportionally by CSS
+// (height set, width auto); the width/height attributes carry the intrinsic ratio so the layout does not jump.
+const logoImg = html`<img class="logo" src="/public/logo.png" width="368" height="96" alt="FanSided">`;
+const wordmark = (href, tag, extra = '') => html`<a href="${href}" class="wordmark${extra}">${logoImg}${tag ? html`<span class="wordmark-tag">${tag}</span>` : ''}</a>`;
 
 // The links, in one place, for both the desktop bar and the small-screen menu.
 function navLinks(active, isAdmin) {
@@ -124,7 +127,7 @@ function page(ctx, { title, body, status = 200, auth = false }) {
   const year = new Date().getFullYear();
 
   const main = auth
-    ? html`<main id="main" class="auth-main" tabindex="-1"><div class="auth-wrap">${wordmark('/', 'Recruit', ' auth-wordmark')}<div class="auth-card">${flashHtml}${body}</div></div></main>`
+    ? html`<main id="main" class="auth-main" tabindex="-1"><div class="auth-wrap">${wordmark('/', '', ' auth-wordmark')}<div class="auth-card">${flashHtml}${body}</div></div></main>`
     : html`<main id="main" tabindex="-1">${flashHtml}${body}</main>`;
   const footer = internal
     ? ''

@@ -99,7 +99,7 @@ describe('AC-41: Vercel entry', () => {
     assert.equal(cfg.functions['api/index.js'].includeFiles, 'public/**');
     const headers = cfg.headers.flatMap((h) => h.headers.map((x) => x.key.toLowerCase()));
     for (const k of ['content-security-policy', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'strict-transport-security']) assert.ok(headers.includes(k), k);
-    assert.deepEqual(fs.readdirSync(path.join(ROOT, 'public')).sort(), ['app.js', 'favicon.svg', 'style.css']);
+    assert.deepEqual(fs.readdirSync(path.join(ROOT, 'public')).filter((f) => f !== 'fonts').sort(), ['app.js', 'favicon.svg', 'logo.png', 'style.css']);
   });
 
   test('package.json: 2.0.0, node 22.x, no dependencies, scripts start/dev/test only', () => {
@@ -185,7 +185,7 @@ describe('repo hygiene', () => {
   });
 });
 
-const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 function assertHeaders(res, label, { production = false } = {}) {
   assert.equal(res.headers.get('content-security-policy'), CSP, `${label}: CSP`);
@@ -256,12 +256,13 @@ for (const driver of DRIVERS) describe(`AC-56 [${driver}]`, () => {
         await hit('413', anon, 'POST', `/roles/${roleId}/apply`, 413, { body: 'a=' + 'x'.repeat(600 * 1024), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
         await hit('415', anon, 'POST', '/login', 415, { body: '{}', headers: { 'content-type': 'application/json' } });
         // static files, GET and HEAD
-        for (const f of ['style.css', 'app.js', 'favicon.svg']) {
+        for (const f of ['style.css', 'app.js', 'favicon.svg', 'logo.png']) {
           const res = await hit(`static ${f}`, anon, 'GET', `/public/${f}`, 200);
           assert.ok(res.buffer.length > 100);
           await hit(`static HEAD ${f}`, anon, 'HEAD', `/public/${f}`, 200);
         }
         await hit('static 404', anon, 'GET', '/public/nothing.css', 404);
+        await hit('missing font 404', anon, 'GET', '/public/fonts/PublicSans-Black.woff2', 404);
         // 500: the database fails
         const broken = createApp({
           env: { NODE_ENV: production ? 'production' : 'test', SESSION_SECRET, TURSO_DATABASE_URL: 'http://127.0.0.1:1', TURSO_AUTH_TOKEN: 'x', BASE_URL: 'http://localhost' },
@@ -398,6 +399,14 @@ test('embedded assets match public/ (run node scripts/embed-assets.js after edit
   const embedded = require('../src/lib/assets.generated');
   for (const name of ['style.css', 'app.js', 'favicon.svg']) {
     assert.strictEqual(embedded[name], fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'));
+  }
+  // Binary files (logo, fonts) are embedded as base64 and must be byte-identical to public/.
+  const expected = ['logo.png'];
+  const fontDir = path.join(__dirname, '..', 'public', 'fonts');
+  if (fs.existsSync(fontDir)) for (const f of fs.readdirSync(fontDir).sort()) if (/\.(woff2|ttf)$/.test(f)) expected.push(`fonts/${f}`);
+  assert.deepStrictEqual(Object.keys(embedded.__binary).sort(), expected.sort());
+  for (const name of expected) {
+    assert.ok(fs.readFileSync(path.join(__dirname, '..', 'public', name)).equals(Buffer.from(embedded.__binary[name], 'base64')), `${name} matches its embedded copy`);
   }
 });
 

@@ -325,7 +325,7 @@ for (const driver of DRIVERS) {
           '/app', '/app?view=all', '/app/account', '/app/export', `/app/roles/${role}`, `/app/applications/${mine.id}`, `/app/applications/${mine.id}?template=1`, `/app/applications/${a.lastInsertRowid}`,
           `/app/people/${mine.person_id}/delete`, '/app/admin/roles', `/app/admin/roles/${role}`, '/app/admin/templates', '/app/admin/users', '/app/admin/sample',
         ];
-        const SAFE_TAGS = new Set(['html', 'head', 'meta', 'title', 'link', 'script', 'body', 'nav', 'a', 'span', 'form', 'input', 'button', 'main', 'p', 'h1', 'h2', 'h3', 'ul', 'ol', 'li', 'div', 'section', 'article', 'header', 'footer', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col', 'label', 'select', 'option', 'textarea', 'details', 'summary', 'dl', 'dt', 'dd', 'code', 'strong', 'em', 'small', 'pre', 'br', 'time', 'fieldset', 'legend', 'datalist']);
+        const SAFE_TAGS = new Set(['html', 'head', 'meta', 'title', 'link', 'script', 'body', 'nav', 'a', 'span', 'form', 'input', 'button', 'main', 'p', 'h1', 'h2', 'h3', 'ul', 'ol', 'li', 'div', 'section', 'article', 'header', 'footer', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col', 'label', 'select', 'option', 'textarea', 'details', 'summary', 'dl', 'dt', 'dd', 'code', 'strong', 'em', 'small', 'pre', 'br', 'time', 'fieldset', 'legend', 'datalist', 'img']);
         const clients = [t.client(), admin];
         for (const url of urls) {
           const res = await (url.startsWith('/app') ? admin : clients[0]).get(url);
@@ -334,6 +334,8 @@ for (const driver of DRIVERS) {
           // walk every tag with a quote-aware pattern: no unexpected tags, no on* / autofocus / style attributes
           for (const m of text.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)) {
             assert.ok(SAFE_TAGS.has(m[2].toLowerCase()), `unexpected <${m[2]}> on ${url}`);
+            // the only image anywhere is the FanSided logo
+            if (m[2].toLowerCase() === 'img') assert.match(m[0], /^<img class="logo" src="\/public\/logo\.png" width="368" height="96" alt="FanSided">$/, `unexpected <img> on ${url}`);
             const attrs = m[3].replace(/"[^"]*"|'[^']*'/g, '""');
             for (const name of attrs.matchAll(/(?:^|\s)([^\s=/]+)/g)) {
               assert.ok(!/^on/i.test(name[1]) && !/^(autofocus|style|srcdoc|formaction)$/i.test(name[1]), `attribute ${name[1]} on ${url}`);
