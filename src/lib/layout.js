@@ -2,7 +2,7 @@
 // Page shell, flash messages and small shared view helpers.
 const { html } = require('./render');
 const { hmacHex, safeEqual } = require('./crypto');
-const { formatDateTime, formatDate } = require('./time');
+const { formatDateTime, formatDateFriendly } = require('./time');
 
 const STAGES = ['new', 'reviewing', 'trial', 'onboarded', 'passed'];
 const STAGE_LABELS = { new: 'New', reviewing: 'Reviewing', trial: 'Trial', onboarded: 'Onboarded', passed: 'Passed' };
@@ -111,6 +111,7 @@ function page(ctx, { title, body, status = 200, auth = false }) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title ? `${title} | ` : ''}FanSided${internal ? ' Recruit' : ''}</title>
+<link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
 <link rel="stylesheet" href="/public/style.css">
 <script src="/public/app.js" defer></script>
 </head>
@@ -141,6 +142,13 @@ function errorPage(ctx, status, message) {
 }
 
 const fmtDateTime = (ctx, iso) => formatDateTime(iso, ctx.app.config.timezone);
-const fmtDate = (ctx, iso) => formatDate(iso, ctx.app.config.timezone);
+const fmtDate = (ctx, iso) => formatDateFriendly(iso, ctx.app.config.timezone);
 
-module.exports = { page, errorPage, setFlash, STAGES, STAGE_LABELS, HEARD_FROM, fmtDateTime, fmtDate };
+// Source tags are free text from ?source=; the common ones read as labels, anything else is shown as typed.
+const SOURCE_LABELS = { linkedin: 'LinkedIn', indeed: 'Indeed', x: 'X', twitter: 'X', 'x/twitter': 'X', referral: 'Referral', site: 'FanSided site', 'fansided site': 'FanSided site', other: 'Other' };
+const sourceLabel = (tag) => {
+  const t = String(tag || '').trim();
+  return SOURCE_LABELS[t.toLowerCase()] || t;
+};
+
+module.exports = { page, errorPage, setFlash, STAGES, STAGE_LABELS, HEARD_FROM, fmtDateTime, fmtDate, sourceLabel };

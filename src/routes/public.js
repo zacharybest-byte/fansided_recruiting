@@ -55,7 +55,7 @@ async function openingsPage(ctx) {
   const wanted = String(ctx.query.get('vertical') || '').trim();
   const verticals = [...groups.keys()];
   const filter = verticals.find((v) => v.toLowerCase() === wanted.toLowerCase()) || '';
-  const shown = filter ? [[filter, groups.get(filter)]] : [...groups];
+  const shown = filter ? groups.get(filter) : roles;
   const link = (vertical) => {
     const params = new URLSearchParams();
     if (vertical) params.set('vertical', vertical);
@@ -70,6 +70,11 @@ async function openingsPage(ctx) {
     body: html`<div class="hero">
         <h1 class="display">Write for FanSided</h1>
         <p class="lede">Cover the teams and shows you know best for one of our fan sites. Pick a role, tell us about your writing and we will be in touch.</p>
+        <ul class="facts">
+          <li><strong>Remote and flexible</strong><span>Write from wherever you are, around your own schedule.</span></li>
+          <li><strong>Cover the team you follow</strong><span>Bring your knowledge of the teams and shows you already watch.</span></li>
+          <li><strong>Edited and published</strong><span>Your work is edited and published on a FanSided site.</span></li>
+        </ul>
       </div>
       ${roles.length === 0
         ? html`<div class="empty">
@@ -79,23 +84,22 @@ async function openingsPage(ctx) {
         : html`${verticals.length > 1
             ? html`<nav aria-label="Filter by vertical"><ul class="filter">${chip('', 'All roles')}${verticals.map((v) => chip(v, v))}</ul></nav>`
             : ''}
-          ${shown.map(
-            ([vertical, list]) => html`<section class="vertical-group" aria-labelledby="v-${vertical.replace(/[^A-Za-z0-9]+/g, '-')}">
-              <h2 id="v-${vertical.replace(/[^A-Za-z0-9]+/g, '-')}">${vertical}<span class="count">${list.length} ${list.length === 1 ? 'role' : 'roles'}</span></h2>
-              <ul class="role-list">
-                ${list.map(
-                  (r) => html`<li class="role-row">
-                    <div class="role-row-main">
-                      <a href="/roles/${r.id}${sourceSuffix(source)}" class="role-title">${r.title}</a>
-                      ${r.site_name ? html`<span class="role-site">${r.site_name}</span>` : ''}
-                      <p class="role-desc">${excerpt(r.description)}</p>
-                    </div>
-                    <div class="role-row-action"><a class="btn btn-primary" href="/roles/${r.id}${sourceSuffix(source)}#apply" aria-label="Apply for ${r.title}">Apply</a></div>
-                  </li>`
-                )}
-              </ul>
-            </section>`
-          )}`}`,
+          ${filter ? html`<h2 class="grid-heading" id="roles-heading">${filter}<span class="count">${shown.length} ${shown.length === 1 ? 'role' : 'roles'}</span></h2>` : html`<h2 class="visually-hidden" id="roles-heading">Open roles</h2>`}
+          <ul class="tile-grid" aria-labelledby="roles-heading">
+            ${shown.map(
+              (r) => html`<li class="tile-item">
+                <article class="tile">
+                  <div class="tile-band"><span class="tile-vertical">${r.vertical || 'Other'}</span></div>
+                  <div class="tile-body">
+                    <h3 class="tile-title"><a href="/roles/${r.id}${sourceSuffix(source)}">${r.title}</a></h3>
+                    ${r.site_name ? html`<p class="tile-site">${r.site_name}</p>` : ''}
+                    <p class="tile-desc">${excerpt(r.description, 220)}</p>
+                  </div>
+                  <div class="tile-action"><a class="btn btn-primary btn-block" href="/roles/${r.id}${sourceSuffix(source)}#apply" aria-label="Apply for ${r.title}">Apply</a></div>
+                </article>
+              </li>`
+            )}
+          </ul>`}`,
   });
 }
 

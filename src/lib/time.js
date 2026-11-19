@@ -30,6 +30,14 @@ function formatDate(iso, timeZone) {
   return formatDateTime(iso, timeZone).slice(0, 10);
 }
 
+// "Nov 18, 2026" in the given zone (friendly display; CSV export keeps the ISO-style formats).
+function formatDateFriendly(iso, timeZone) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-US', { timeZone, month: 'short', day: 'numeric', year: 'numeric' }).format(d);
+}
+
 function todayIn(timeZone, now = new Date()) {
   const p = parts(now, timeZone);
   return `${p.year}-${p.month}-${p.day}`;
@@ -66,4 +74,4 @@ function daysSince(iso, now = new Date()) {
   return Math.max(0, Math.floor((now.getTime() - t) / 86400000));
 }
 
-module.exports = { formatDateTime, formatDate, todayIn, zonedMidnightUtc, isValidYmd, daysSince };
+module.exports = { formatDateTime, formatDate, formatDateFriendly, todayIn, zonedMidnightUtc, isValidYmd, daysSince };

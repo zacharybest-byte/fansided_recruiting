@@ -33,19 +33,30 @@ after(() => t.close());
 test('AC-01: openings list groups open roles by vertical, hides closed ones, no login', async () => {
   const res = await t.client().get('/');
   assert.equal(res.status, 200);
-  assert.match(res.text, /<h2 id="v-NFL">NFL/);
-  assert.match(res.text, /<h2 id="v-NBA">NBA/);
+  // one continuous tile grid (a list of articles, each with a heading), the vertical is on each tile
+  assert.match(res.text, /<ul class="tile-grid"/);
+  assert.match(res.text, /<span class="tile-vertical">NFL<\/span>/);
+  assert.match(res.text, /<span class="tile-vertical">NBA<\/span>/);
   assert.match(res.text, /Bears Writer/);
   assert.match(res.text, /Hoops Writer/);
   assert.match(res.text, /Bears Wire/);
   assert.match(res.text, /First line of the bears job\./);
   assert.doesNotMatch(res.text, /Second line/); // one-line excerpt only
   assert.doesNotMatch(res.text, /Closed Prospects Role/);
-  assert.doesNotMatch(res.text, /<h2 id="v-MLB">/);
-  // NFL group holds both NFL roles
-  const nflSection = res.text.split('<h2 id="v-NFL">')[1].split('</section>')[0];
-  assert.match(nflSection, /Bears Writer/);
-  assert.match(nflSection, /Questionnaire Role/);
+  assert.doesNotMatch(res.text, /<h2 id="v-/); // no per-vertical headings in the grid view
+  assert.doesNotMatch(res.text, /<span class="tile-vertical">MLB<\/span>/);
+  const tiles = res.text.split('<article class="tile">').slice(1);
+  assert.ok(tiles.length >= 3);
+  assert.ok(tiles.every((x) => /<h3 class="tile-title"><a href="\/roles\/\d+/.test(x)));
+  // sorted by vertical, then title
+  const keys = tiles.map((x) => `${/tile-vertical">([^<]*)</.exec(x)[1]}|${/tile-title"><a [^>]*>([^<]*)</.exec(x)[1]}`);
+  assert.deepEqual(keys, [...keys].sort((p, q) => p.localeCompare(q, 'en', { sensitivity: 'base' })));
+  // filtered: heading with the vertical and count, only that vertical's tiles
+  const nfl = await t.client().get('/?vertical=NFL');
+  assert.match(nfl.text, /<h2 class="grid-heading" id="roles-heading">NFL<span class="count">2 roles<\/span><\/h2>/);
+  assert.match(nfl.text, /Bears Writer/);
+  assert.match(nfl.text, /Questionnaire Role/);
+  assert.doesNotMatch(nfl.text, /Hoops Writer/);
   assert.match(res.headers.get('content-security-policy'), /^default-src 'none'; script-src 'self'/);
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
 });

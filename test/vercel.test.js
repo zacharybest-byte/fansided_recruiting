@@ -99,7 +99,7 @@ describe('AC-41: Vercel entry', () => {
     assert.equal(cfg.functions['api/index.js'].includeFiles, 'public/**');
     const headers = cfg.headers.flatMap((h) => h.headers.map((x) => x.key.toLowerCase()));
     for (const k of ['content-security-policy', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'strict-transport-security']) assert.ok(headers.includes(k), k);
-    assert.deepEqual(fs.readdirSync(path.join(ROOT, 'public')).sort(), ['app.js', 'style.css']);
+    assert.deepEqual(fs.readdirSync(path.join(ROOT, 'public')).sort(), ['app.js', 'favicon.svg', 'style.css']);
   });
 
   test('package.json: 2.0.0, node 22.x, no dependencies, scripts start/dev/test only', () => {
@@ -256,7 +256,7 @@ for (const driver of DRIVERS) describe(`AC-56 [${driver}]`, () => {
         await hit('413', anon, 'POST', `/roles/${roleId}/apply`, 413, { body: 'a=' + 'x'.repeat(600 * 1024), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
         await hit('415', anon, 'POST', '/login', 415, { body: '{}', headers: { 'content-type': 'application/json' } });
         // static files, GET and HEAD
-        for (const f of ['style.css', 'app.js']) {
+        for (const f of ['style.css', 'app.js', 'favicon.svg']) {
           const res = await hit(`static ${f}`, anon, 'GET', `/public/${f}`, 200);
           assert.ok(res.buffer.length > 100);
           await hit(`static HEAD ${f}`, anon, 'HEAD', `/public/${f}`, 200);
@@ -387,7 +387,7 @@ test('embedded assets match public/ (run node scripts/embed-assets.js after edit
   const fs = require('node:fs');
   const path = require('node:path');
   const embedded = require('../src/lib/assets.generated');
-  for (const name of ['style.css', 'app.js']) {
+  for (const name of ['style.css', 'app.js', 'favicon.svg']) {
     assert.strictEqual(embedded[name], fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'));
   }
 });

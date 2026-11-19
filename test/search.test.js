@@ -38,7 +38,7 @@ for (const driver of DRIVERS) describe(`[${driver}] candidates search`, () => {
     assert.deepEqual(rowsOf(res.text).map((r) => r.name), ['Maria Gonzalez']);
     assert.match(res.text, /Search Role/);
     assert.match(res.text, /stage-badge stage-trial">Trial</);
-    assert.match(res.text, /2026-11-01/);
+    assert.match(res.text, /Nov 1, 2026/);
   });
 
   test('finds by email', async () => {

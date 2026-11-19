@@ -325,7 +325,7 @@ for (const driver of DRIVERS) {
           '/app', '/app?view=all', '/app/account', '/app/export', `/app/roles/${role}`, `/app/applications/${mine.id}`, `/app/applications/${mine.id}?template=1`, `/app/applications/${a.lastInsertRowid}`,
           `/app/people/${mine.person_id}/delete`, '/app/admin/roles', `/app/admin/roles/${role}`, '/app/admin/templates', '/app/admin/users', '/app/admin/sample',
         ];
-        const SAFE_TAGS = new Set(['html', 'head', 'meta', 'title', 'link', 'script', 'body', 'nav', 'a', 'span', 'form', 'input', 'button', 'main', 'p', 'h1', 'h2', 'h3', 'ul', 'ol', 'li', 'div', 'section', 'header', 'footer', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col', 'label', 'select', 'option', 'textarea', 'details', 'summary', 'dl', 'dt', 'dd', 'code', 'strong', 'em', 'small', 'pre', 'br', 'time', 'fieldset', 'legend', 'datalist']);
+        const SAFE_TAGS = new Set(['html', 'head', 'meta', 'title', 'link', 'script', 'body', 'nav', 'a', 'span', 'form', 'input', 'button', 'main', 'p', 'h1', 'h2', 'h3', 'ul', 'ol', 'li', 'div', 'section', 'article', 'header', 'footer', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col', 'label', 'select', 'option', 'textarea', 'details', 'summary', 'dl', 'dt', 'dd', 'code', 'strong', 'em', 'small', 'pre', 'br', 'time', 'fieldset', 'legend', 'datalist']);
         const clients = [t.client(), admin];
         for (const url of urls) {
           const res = await (url.startsWith('/app') ? admin : clients[0]).get(url);

@@ -1,7 +1,7 @@
 'use strict';
 // Internal: candidate page and its actions (stage, role move, Voltax, notes, email log, delete).
 const { html, raw, link, multiline } = require('../lib/render');
-const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, fmtDateTime } = require('../lib/layout');
+const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, fmtDateTime, sourceLabel } = require('../lib/layout');
 const { requireUser, requireAdmin } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
@@ -108,7 +108,7 @@ async function candidatePage(ctx) {
               <div><dt>Email</dt><dd><a href="mailto:${encodeURIComponent(person.email)}">${person.email}</a></dd></div>
               ${linkedin ? html`<div><dt>Profile</dt><dd>${link(linkedin, 'LinkedIn or portfolio')}</dd></div>` : ''}
               <div><dt>Role</dt><dd>${app.role_title}${app.role_status === 'closed' ? ' (closed)' : ''}</dd></div>
-              <div><dt>Applied</dt><dd>${fmtDateTime(ctx, app.applied_at)}</dd></div>
+              <div><dt>Applied</dt><dd>${fmtDate(ctx, app.applied_at)}</dd></div>
             </dl>
           </div>
           <div class="page-actions"><span class="stage-badge stage-${app.stage}">${STAGE_LABELS[app.stage]}</span></div>
@@ -135,7 +135,7 @@ async function candidatePage(ctx) {
             <dt>Resume</dt>
             <dd>${app.resume_url ? link(app.resume_url) : html`<span class="muted">None</span>`}</dd>
             ${answers.map((a) => html`<dt>${a.question}</dt><dd>${a.answer ? multiline(a.answer) : html`<span class="muted">No answer</span>`}</dd>`)}
-            <dt>Source</dt><dd>${app.source_tag || html`<span class="muted">None</span>`}</dd>
+            <dt>Source</dt><dd>${sourceLabel(app.source_tag) || html`<span class="muted">None</span>`}</dd>
             <dt>How they heard about us</dt><dd>${app.heard_from || html`<span class="muted">Not given</span>`}</dd>
           </dl>
         </section>
@@ -284,7 +284,7 @@ async function changeStage(ctx) {
   const back = returnTo(ctx, `/app/applications/${id}`);
   const stage = ctx.form.get('stage');
   if (!STAGES.includes(stage)) {
-    setFlash(ctx, 'error', 'Unknown stage.');
+    setFlash(ctx, 'error', stage === '' ? 'Choose a stage to move this candidate to.' : 'Unknown stage.');
     return ctx.redirect(back);
   }
   if (stage === app.stage) return ctx.redirect(back); // picking the current stage again does nothing

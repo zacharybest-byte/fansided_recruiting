@@ -22,14 +22,6 @@
     if (msg && !window.confirm(msg)) e.preventDefault();
   });
 
-  // Clicking a pipeline row opens the candidate (links and forms inside keep working).
-  document.addEventListener('click', function (e) {
-    var row = e.target.closest && e.target.closest('tr[data-href]');
-    if (!row) return;
-    if (e.target.closest('a, button, select, input, textarea, label, form')) return;
-    window.location.href = row.getAttribute('data-href');
-  });
-
   // Show the Voltax fields only when "Onboarded" is picked.
   document.querySelectorAll('.voltax-fields[data-show-for]').forEach(function (box) {
     var form = box.closest('form');

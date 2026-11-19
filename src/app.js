@@ -26,6 +26,7 @@ function loadStatic() {
       data = Buffer.from(embedded[name]);
     }
     files.set(`/public/${name}`, { data, type: STATIC_TYPES[path.extname(name)] });
+    if (name === 'favicon.svg') files.set('/favicon.ico', { data, type: STATIC_TYPES['.svg'] });
   }
   return files;
 }

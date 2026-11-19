@@ -204,7 +204,7 @@ test('AC-24 + AC-25: notes follow the person; history lists prior applications w
   const notes = page2.text.split('id="notes"')[1].split('</section>')[0];
   assert.match(notes, /<span class="tag">Role A<\/span>/); // tagged with the application's role
   const history = page2.text.split('id="history"')[1].split('</section>')[0];
-  assert.match(history, new RegExp(`<a href="/app/applications/${first}">Role A</a></td><td>\\d{4}-\\d{2}-\\d{2}</td><td><span class="stage-badge stage-passed">Passed</span></td>`));
+  assert.match(history, new RegExp(`<a href="/app/applications/${first}">Role A</a></td><td>[A-Z][a-z]{2} \\d{1,2}, \\d{4}</td><td><span class="stage-badge stage-passed">Passed</span></td>`));
 
   // A note on the second application shows on the first too, newest first.
   await c.post(`/app/applications/${second}/notes`, { body: 'Reapplied for B' });

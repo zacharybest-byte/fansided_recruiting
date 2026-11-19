@@ -1,7 +1,7 @@
 'use strict';
 // Internal: dashboard, role pipeline, reassign rep, CSV export.
 const { html, raw } = require('../lib/render');
-const { page, setFlash, STAGES, STAGE_LABELS, fmtDate } = require('../lib/layout');
+const { page, setFlash, STAGES, STAGE_LABELS, fmtDate, sourceLabel } = require('../lib/layout');
 const { requireUser } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
@@ -177,15 +177,16 @@ async function rolePipeline(ctx) {
                     <a class="cand-name" href="/app/applications/${a.id}">${a.name}</a>
                     <span class="cand-email">${a.email}</span>
                     <dl class="cand-meta">
-                      <div><dt>Source</dt><dd class="cand-source">${a.source_tag || 'None'}</dd></div>
+                      <div><dt>Source</dt><dd class="cand-source">${sourceLabel(a.source_tag) || 'None'}</dd></div>
                       <div><dt>In stage</dt><dd>${daysSince(a.stage_changed_at)} ${daysSince(a.stage_changed_at) === 1 ? 'day' : 'days'}</dd></div>
                       <div><dt>Applied</dt><dd>${fmtDate(ctx, a.applied_at)}</dd></div>
                     </dl>
                     <form method="post" action="/app/applications/${a.id}/stage" class="cand-move">
                       ${csrfField(ctx)}
                       <input type="hidden" name="return_to" value="${returnTo}">
-                      <select name="stage" aria-label="Move ${a.name} to stage">
-                        ${STAGES.map((s) => html`<option value="${s}"${s === a.stage ? raw(' selected') : ''}>${STAGE_LABELS[s]}</option>`)}
+                      <select name="stage" aria-label="Move ${a.name} to stage" required>
+                        <option value="">Move to…</option>
+                        ${STAGES.filter((s) => s !== a.stage).map((s) => html`<option value="${s}">${STAGE_LABELS[s]}</option>`)}
                       </select>
                       <button type="submit" aria-label="Move ${a.name} to the selected stage">Move</button>
                     </form>
