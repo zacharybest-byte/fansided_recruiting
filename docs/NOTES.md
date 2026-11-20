@@ -1,5 +1,16 @@
 # Build notes
 
+## 2.4.0 (linked documents on email templates)
+
+- **Why links.** A Gmail/mailto draft URL cannot carry files, so the owner chose "linked documents": each template holds up to 5 `{name, url}` pairs, appended to the body as text. Nothing is uploaded or stored by the app.
+- **Migration 5**: `ALTER TABLE email_templates ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'`, a single statement in one atomic batch with its `schema_migrations` row (cold and concurrent starts behave like migrations 3 and 4). No rewrite, no backfill: existing templates read `[]` through the default, and an older deployment still running during a rollout can insert and update templates without knowing the column.
+- **Validation lives in `readTemplate` (src/routes/admin.js).** URLs go through `normaliseUrl`, moved from src/routes/public.js to src/lib/urls.js so both forms share one implementation. Duplicates are compared after normalisation. Errors are keyed `doc_name_N` / `doc_url_N` and link to those inputs from the summary.
+- **Composer.** `src/lib/email.js`: `parseDocuments` (tolerant of bad JSON), `resolveDocuments` (merge fields in names only, whitespace collapsed to one line), `bodyWithDocuments`. The block is plain text in the textarea; nothing in the hand-off or logging path changed, so the exact Gmail and mailto URLs are the existing `composeUrl` encoding of the final text.
+- **Body limit.** A template's body is now limited to 4,000 characters in total with its documents block (was 10,000), because the composer has always refused over 4,000. Merge fields are counted at 40/100/60 characters (first name / role title / rep name) so a filled-in draft stays within the limit in all but extreme cases; the composer's own check remains the backstop. Existing live templates over 4,000 characters would have to be shortened the next time they are saved.
+- **Activity** is unchanged: the body is shown through `multiline()` (escaped, not auto-linked), so no new HTML injection path.
+- **Sample data** has no email templates, so there is no sample document; the four seeded templates are untouched.
+- Tests: `test/linked-documents.test.js`. `test/migration.test.js` and `test/migration-questionnaires.test.js` pin their own migration with `upTo` now that a fifth migration exists.
+
 ## 2.3.0 (questionnaire templates)
 
 - A **questionnaire** is a named, reusable list of questions (up to 5, each up to 500 characters, with a required flag). A role selects one or none. Editing a questionnaire changes the apply form of every role that uses it at once; submitted answers are snapshots (question text + answer) and never change. Admin screens: Manage > Questionnaires (list, new, edit, duplicate, delete) and a Questionnaire select on the role form. Delete is refused while any role uses it.

@@ -6,7 +6,8 @@ const { requireAdmin, normaliseEmail } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
 const { nowIso } = require('../lib/db');
-const { MERGE_FIELDS } = require('../lib/email');
+const { MERGE_FIELDS, DOCS, parseDocuments, worstCaseLength } = require('../lib/email');
+const { normaliseUrl } = require('../lib/urls');
 const { randomToken, sha256Hex } = require('../lib/crypto');
 const { idParam } = require('./dashboard');
 const { rateKey } = require('../lib/ratelimit');
@@ -28,9 +29,9 @@ async function templatesPage(ctx) {
       ${templates.length === 0
         ? html`<div class="empty"><h2>No templates yet</h2><p>Write the replies you send most often, such as a thank-you or a trial invitation, so reps can load them in one click.</p>
             <p><a class="btn btn-primary" href="/app/admin/templates/new">Create the first template</a></p></div>`
-        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Subject</th><th>Updated</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+        : html`<div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Subject</th><th>Linked documents</th><th>Updated</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
         ${templates.map(
-          (t) => html`<tr><td><a href="/app/admin/templates/${t.id}"><strong>${t.name}</strong></a></td><td>${t.subject}</td><td>${fmtDate(ctx, t.updated_at)}</td>
+          (t) => html`<tr><td><a href="/app/admin/templates/${t.id}"><strong>${t.name}</strong></a></td><td>${t.subject}</td><td>${parseDocuments(t.attachments_json).length}</td><td>${fmtDate(ctx, t.updated_at)}</td>
             <td><div class="row-actions"><a href="/app/admin/templates/${t.id}">Edit</a>
               <a class="danger-link" href="/app/admin/templates/${t.id}/delete">Delete<span class="visually-hidden"> ${t.name}</span></a></div></td></tr>`
         )}
@@ -47,6 +48,8 @@ function mergeFieldHelp() {
 
 function templateForm(ctx, t, { errors = {}, status = 200 } = {}) {
   const isNew = !t.id;
+  // Five rows: what was typed (after an error), or the saved documents, then blank rows.
+  const rows = Array.from({ length: DOCS.max }, (_, i) => (t.docRows || parseDocuments(t.attachments_json))[i] || { name: '', url: '' });
   page(ctx, {
     title: isNew ? 'New template' : 'Edit template',
     status,
@@ -58,7 +61,18 @@ function templateForm(ctx, t, { errors = {}, status = 200 } = {}) {
         ${csrfField(ctx)}
         ${field(errors, 'name', 'Name', { required: true, help: 'Reps see this name in the template list.' }, (a) => html`<input type="text" ${a} name="name" maxlength="200" value="${t.name || ''}" required>`)}
         ${field(errors, 'subject', 'Subject', { required: true }, (a) => html`<input type="text" ${a} name="subject" maxlength="200" value="${t.subject || ''}" required>`)}
-        ${field(errors, 'body', 'Body', { required: true, help: 'Plain text. Line breaks are kept.' }, (a) => html`<textarea ${a} name="body" rows="12" maxlength="10000" required>${t.body || ''}</textarea>`)}
+        ${field(errors, 'body', 'Body', { required: true, help: `Plain text. Line breaks are kept. Up to ${DOCS.body.toLocaleString('en-US')} characters including the linked documents, which are added after the body.` }, (a) => html`<textarea ${a} name="body" rows="12" maxlength="${DOCS.body}" required>${t.body || ''}</textarea>`)}
+        <fieldset class="form-section" id="documents">
+          <legend>Linked documents</legend>
+          <p class="help" id="help-documents">Files cannot be attached to a draft, so add links to documents instead (for example a Google Drive link that anyone with the link can view). They are added to the end of the email.</p>
+          <p class="help">Up to ${DOCS.max} documents. Leave a row blank to skip it. A row needs both a name and a link. Merge fields work in names, not in links.</p>
+          ${rows.map(
+            (r, i) => html`<div class="field-row doc-row">
+              ${field(errors, `doc_name_${i + 1}`, `Document ${i + 1} name`, {}, (a) => html`<input type="text" ${a} name="doc_name_${i + 1}" maxlength="${DOCS.name * 2}" value="${r.name}">`)}
+              ${field(errors, `doc_url_${i + 1}`, `Document ${i + 1} link`, {}, (a) => html`<input type="text" ${a} inputmode="url" name="doc_url_${i + 1}" maxlength="${DOCS.url * 2}" value="${r.url}" placeholder="https://">`)}
+            </div>`
+          )}
+        </fieldset>
         <div class="form-actions"><button type="submit" class="btn btn-primary">Save template</button><a class="btn btn-secondary" href="/app/admin/templates">Cancel</a></div>
       </form>
       ${mergeFieldHelp()}
@@ -75,7 +89,39 @@ function readTemplate(form) {
   const errors = {};
   if (!t.name || t.name.length > 200) errors.name = 'Name is required (up to 200 characters).';
   if (!t.subject || t.subject.length > 200) errors.subject = 'Subject is required (up to 200 characters).';
-  if (!t.body || t.body.length > 10000) errors.body = 'Body is required (up to 10,000 characters).';
+
+  // Linked documents: DOCS.max rows (a sixth is never read); a row needs both a name and a link or neither.
+  const docErrors = {};
+  const docs = [];
+  t.docRows = [];
+  for (let n = 1; n <= DOCS.max; n++) {
+    const name = form.get(`doc_name_${n}`).replace(/\s+/g, ' ').trim();
+    const typed = form.get(`doc_url_${n}`).trim();
+    t.docRows.push({ name, url: typed });
+    if (!name && !typed) continue;
+    const label = `Document ${n}`;
+    if (!name) { docErrors[`doc_name_${n}`] = `${label}: add a name, or clear the link.`; continue; }
+    if (name.length > DOCS.name) { docErrors[`doc_name_${n}`] = `${label}: the name must be at most ${DOCS.name} characters.`; continue; }
+    if (!typed) { docErrors[`doc_url_${n}`] = `${label}: add a link, or clear the name.`; continue; }
+    if (typed.length > DOCS.url) { docErrors[`doc_url_${n}`] = `${label}: the link must be at most ${DOCS.url} characters.`; continue; }
+    const url = normaliseUrl(typed);
+    if (!url || url.length > DOCS.url) { docErrors[`doc_url_${n}`] = `${label}: the link must be a valid link starting with https://`; continue; }
+    const dup = docs.find((d) => d.url === url);
+    if (dup) { docErrors[`doc_url_${n}`] = `${label}: this link is already used for "${dup.name}". Each document needs its own link.`; continue; }
+    docs.push({ name, url });
+  }
+
+  if (!t.body) errors.body = 'Body is required.';
+  else {
+    const len = worstCaseLength(t.body, docs);
+    if (len > DOCS.body) {
+      errors.body = docs.length
+        ? `The body and the linked documents together can reach ${len.toLocaleString('en-US')} characters. A draft can hold ${DOCS.body.toLocaleString('en-US')}. Shorten the body or remove a document.`
+        : `The body can reach ${len.toLocaleString('en-US')} characters. A draft can hold ${DOCS.body.toLocaleString('en-US')}. Shorten the body.`;
+    }
+  }
+  Object.assign(errors, docErrors);
+  t.attachments_json = JSON.stringify(docs);
   return { t, errors };
 }
 
@@ -584,7 +630,7 @@ function register(router) {
   router.post('/app/admin/templates', ...AP, async (ctx) => {
     const { t, errors } = readTemplate(ctx.form);
     if (Object.keys(errors).length) return templateForm(ctx, t, { errors, status: 400 });
-    await ctx.app.db.run('INSERT INTO email_templates (name, subject, body, updated_at) VALUES (?, ?, ?, ?)', [t.name, t.subject, t.body, nowIso()]);
+    await ctx.app.db.run('INSERT INTO email_templates (name, subject, body, attachments_json, updated_at) VALUES (?, ?, ?, ?, ?)', [t.name, t.subject, t.body, t.attachments_json, nowIso()]);
     setFlash(ctx, 'ok', 'Template created.');
     ctx.redirect('/app/admin/templates');
   });
@@ -593,7 +639,7 @@ function register(router) {
     const existing = await getTemplate(ctx.app.db, ctx.params.id);
     const { t, errors } = readTemplate(ctx.form);
     if (Object.keys(errors).length) return templateForm(ctx, { ...t, id: existing.id }, { errors, status: 400 });
-    await ctx.app.db.run('UPDATE email_templates SET name = ?, subject = ?, body = ?, updated_at = ? WHERE id = ?', [t.name, t.subject, t.body, nowIso(), existing.id]);
+    await ctx.app.db.run('UPDATE email_templates SET name = ?, subject = ?, body = ?, attachments_json = ?, updated_at = ? WHERE id = ?', [t.name, t.subject, t.body, t.attachments_json, nowIso(), existing.id]);
     setFlash(ctx, 'ok', 'Template saved.');
     ctx.redirect('/app/admin/templates');
   });

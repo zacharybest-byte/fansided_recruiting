@@ -74,7 +74,7 @@ function secondConnection(driver, handle) {
 for (const driver of DRIVERS) {
   describe(`migration 3: per-role workflows [${driver}]`, () => {
     test('migration 3 exists; the schema it starts from is the current one (versions 1 and 2)', async () => {
-      assert.deepEqual(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4]);
+      assert.deepEqual(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5]);
       const h = await freshDb(driver, { upTo: 2 });
       try {
         assert.equal(await currentVersion(h.db), 2);
@@ -231,7 +231,7 @@ for (const driver of DRIVERS) {
         const seed = await seedLegacy(h.db);
         await makeUser(h.db, { email: 'admin@fansided.com', role: 'admin' });
         t = await startApp({ driver, dataDir: h.dir, fake: h.fake, ownFake: false });
-        assert.equal(await currentVersion(t.db), 4); // the app runs every migration
+        assert.equal(await currentVersion(t.db), 5); // the app runs every migration
         const c = t.client();
         await c.login('admin@fansided.com');
         const dash = await c.get('/app?view=all');

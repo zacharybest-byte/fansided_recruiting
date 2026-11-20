@@ -9,6 +9,7 @@ const { MIGRATIONS, migrate, openDb } = require('../src/lib/db');
 const { currentVersion } = require('../src/lib/db/migrations');
 const qn = require('../src/lib/questionnaires');
 
+const migrate4 = (db) => migrate(db, { upTo: 4 });
 const T0 = '2026-10-01T12:00:00.000Z';
 const q = (text, required = false) => ({ text, required });
 const j = (list) => JSON.stringify(list);
@@ -108,8 +109,8 @@ const HAS_QUESTIONS = ROLES.map(([, json]) => oldQuestions(json).length > 0);
 
 for (const driver of DRIVERS) {
   describe(`migration 4: questionnaires [${driver}]`, () => {
-    test('migration 4 is the last one; the schema it starts from has no questionnaires', async () => {
-      assert.deepEqual(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4]);
+    test('migration 4 is followed by migration 5; the schema it starts from has no questionnaires', async () => {
+      assert.deepEqual(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5]);
       const h = await freshDb(driver, { upTo: 3 });
       try {
         assert.equal(await currentVersion(h.db), 3);
@@ -137,7 +138,7 @@ for (const driver of DRIVERS) {
       try {
         const seeded = await seed(h.db);
         const before = await snapshot(h.db);
-        const res = await migrate(h.db);
+        const res = await migrate4(h.db);
         assert.deepEqual(res, { from: 3, to: 4 });
         assert.equal(await currentVersion(h.db), 4);
 
@@ -174,7 +175,7 @@ for (const driver of DRIVERS) {
       const h = await freshDb(driver, { upTo: 3 });
       try {
         await seed(h.db);
-        await migrate(h.db);
+        await migrate4(h.db);
         const rows = await h.db.all('SELECT r.id, r.title, q.name FROM job_roles r JOIN questionnaires q ON q.id = r.questionnaire_id ORDER BY r.id');
         const byTitle = (t) => rows.filter((r) => r.title === t);
         assert.equal(byTitle('Chiefs writer')[0].name, 'Chiefs writer questions');
@@ -205,7 +206,7 @@ for (const driver of DRIVERS) {
       const h = await freshDb(driver, { upTo: 3 });
       try {
         await seed(h.db);
-        await migrate(h.db);
+        await migrate4(h.db);
         const roleOf = (title) => h.db.get('SELECT * FROM job_roles WHERE title = ?', [title]);
         for (const title of ['No questions at all', 'Spaced empty', 'Newline empty', 'Tab empty', 'Blank string', 'Not an array']) {
           assert.equal((await roleOf(title)).questionnaire_id, null, title);
@@ -225,7 +226,7 @@ for (const driver of DRIVERS) {
       try {
         const seeded = await seed(h.db);
         t = await startApp({ driver, dataDir: h.dir, fake: h.fake, ownFake: false });
-        assert.equal(await currentVersion(t.db), 4);
+        assert.equal(await currentVersion(t.db), 5);
         const c = t.client();
         for (let i = 0; i < ROLES.length; i++) {
           const res = await c.get(`/roles/${seeded.roles[i]}`);
@@ -258,10 +259,10 @@ for (const driver of DRIVERS) {
       const h = await freshDb(driver, { upTo: 3 });
       try {
         await seed(h.db);
-        await migrate(h.db);
+        await migrate4(h.db);
         const once = { q: await h.db.all('SELECT * FROM questionnaires ORDER BY id'), roles: await h.db.all('SELECT * FROM job_roles ORDER BY id'), mig: await h.db.all('SELECT * FROM schema_migrations ORDER BY version') };
         assert.deepEqual(await qn.repair(h.db), { created: 0, cleared: 0 });
-        assert.deepEqual(await migrate(h.db), { from: 4, to: 4 });
+        assert.deepEqual(await migrate4(h.db), { from: 4, to: 4 });
         assert.deepEqual(await qn.repair(h.db), { created: 0, cleared: 0 });
         assert.deepEqual(await h.db.all('SELECT * FROM questionnaires ORDER BY id'), once.q);
         assert.deepEqual(await h.db.all('SELECT * FROM job_roles ORDER BY id'), once.roles);
@@ -274,7 +275,7 @@ for (const driver of DRIVERS) {
     test('an empty database (no roles) and a database whose roles have no questions migrate too', async () => {
       const h = await freshDb(driver, { upTo: 3 });
       try {
-        await migrate(h.db);
+        await migrate4(h.db);
         assert.equal((await h.db.get('SELECT COUNT(*) AS n FROM questionnaires')).n, 0);
         assert.ok((await columnsOf(h.db, 'job_roles')).includes('questionnaire_id'));
       } finally {
@@ -283,7 +284,7 @@ for (const driver of DRIVERS) {
       const h2 = await freshDb(driver, { upTo: 3 });
       try {
         await h2.db.run("INSERT INTO job_roles (title, vertical, created_at, updated_at) VALUES ('Bare', 'NFL', ?, ?)", [T0, T0]);
-        await migrate(h2.db);
+        await migrate4(h2.db);
         assert.equal((await h2.db.get('SELECT COUNT(*) AS n FROM questionnaires')).n, 0);
         assert.equal((await h2.db.get('SELECT questionnaire_id FROM job_roles')).questionnaire_id, null);
       } finally {
@@ -305,7 +306,7 @@ for (const driver of DRIVERS) {
         assert.equal(await h.db.get("SELECT 1 AS x FROM sqlite_master WHERE name IN ('questionnaires_name_nocase', 'job_roles_questionnaire')"), undefined);
         assert.equal(await currentVersion(h.db), 3);
         assert.deepEqual(await snapshot(h.db), before);
-        assert.deepEqual(await migrate(h.db), { from: 3, to: 4 }); // and the real migration still runs
+        assert.deepEqual(await migrate4(h.db), { from: 3, to: 4 }); // and the real migration still runs
       } finally {
         await h.close();
       }
@@ -336,7 +337,7 @@ for (const driver of DRIVERS) {
         const real = MIGRATIONS[3].statements;
         MIGRATIONS[3].statements = () => withoutLink;
         try {
-          await assert.rejects(migrate(h.db));
+          await assert.rejects(migrate4(h.db));
         } finally {
           MIGRATIONS[3].statements = real;
         }
@@ -351,7 +352,7 @@ for (const driver of DRIVERS) {
       const second = secondConnection(driver, h);
       try {
         await seed(h.db);
-        const results = await Promise.all([migrate(h.db), migrate(second), migrate(h.db)]);
+        const results = await Promise.all([migrate4(h.db), migrate4(second), migrate4(h.db)]);
         assert.ok(results.every((r) => r.to === 4));
         assert.equal(await currentVersion(h.db), 4);
         assert.equal((await h.db.get('SELECT COUNT(*) AS n FROM questionnaires')).n, HAS_QUESTIONS.filter(Boolean).length, 'no duplicated questionnaires');
@@ -369,7 +370,7 @@ for (const driver of DRIVERS) {
       async function migrated() {
         const h = await freshDb(driver, { upTo: 3 });
         const seeded = await seed(h.db);
-        await migrate(h.db);
+        await migrate4(h.db);
         return { h, seeded };
       }
       const roleRow = (db, id) => db.get('SELECT * FROM job_roles WHERE id = ?', [id]);

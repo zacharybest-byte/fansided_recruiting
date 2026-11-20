@@ -794,3 +794,11 @@ h1, h2, h3, .board-col-head, .role-title, .history-title { overflow-wrap: anywhe
 
 /* Long unbroken questions, labels and names wrap instead of widening the page. */
 label, legend, .field, .chip, .preview-list li, .meta-list dd { overflow-wrap: anywhere; min-width: 0; }
+
+/* Linked documents (2.4.0): the note under the template picker and the template form rows */
+.doc-note { margin: 0 0 var(--sp-4); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--line); border-left: 4px solid var(--brand-2); border-radius: var(--radius); background: var(--field); font-size: var(--fs-sm); }
+.doc-note p { margin: 0 0 var(--sp-2); }
+.doc-note ul { margin: 0; padding-left: 1.1rem; }
+.doc-note li { overflow-wrap: anywhere; }
+.doc-row { margin: 0; }
+.form-section .doc-row > .field:last-child, .doc-row > .field { margin-bottom: var(--sp-5); }

@@ -183,6 +183,7 @@ const MIGRATIONS = [
   },
   { version: 3, name: 'per-role workflows (role_stages, applications.stage_id, backfill, triggers)', statements: () => workflowMigration() },
   { version: 4, name: 'questionnaires (questionnaires table, job_roles.questionnaire_id, backfill)', statements: () => questionnaireMigration() },
+  { version: 5, name: 'linked documents (email_templates.attachments_json)', statements: () => linkedDocumentsMigration() },
 ];
 
 
@@ -295,6 +296,13 @@ function questionnaireMigration() {
       args: [now, now],
     },
   ];
+}
+
+// Migration 5 (v2.4.0): linked documents. ADDITIVE ONLY: one new column with a default, nothing else. Existing templates
+// read '[]' (no documents) and are not rewritten; older code that does not know the column keeps working because of the
+// default. Stored as JSON [{"name": "...", "url": "https://..."}].
+function linkedDocumentsMigration() {
+  return ["ALTER TABLE email_templates ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'"];
 }
 
 // One cheap read. A missing schema_migrations table means version 0.

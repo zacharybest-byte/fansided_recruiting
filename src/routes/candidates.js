@@ -7,7 +7,7 @@ const { requireUser, requireAdmin } = require('../lib/auth');
 const { csrfField, internalForm } = require('../lib/csrf');
 const { HttpError } = require('../lib/http');
 const { nowIso } = require('../lib/db');
-const { applyMergeFields, firstName, composeUrl, MERGE_FIELDS, VIA_LABELS } = require('../lib/email');
+const { applyMergeFields, resolveDocuments, parseDocuments, bodyWithDocuments, firstName, composeUrl, MERGE_FIELDS, VIA_LABELS } = require('../lib/email');
 const { todayIn, isValidYmd, daysSince } = require('../lib/time');
 const { idParam } = require('./dashboard');
 const voltax = require('../voltax');
@@ -167,10 +167,10 @@ async function candidatePage(ctx) {
     [person.id]
   );
   const history = await loadHistory(db, person.id, app.id);
-  const templates = await db.all('SELECT id, name, subject, body FROM email_templates ORDER BY name COLLATE NOCASE');
+  const templates = await db.all('SELECT id, name, subject, body, attachments_json FROM email_templates ORDER BY name COLLATE NOCASE');
 
   // Email composer: "Load" is a plain GET (?template=ID) so it works without JS.
-  let draft = { subject: '', body: '', templateId: '', unknown: [] };
+  let draft = { subject: '', body: '', templateId: '', unknown: [], docs: [] };
   const tplId = ctx.query.get('template');
   if (tplId) {
     const tpl = templates.find((t) => String(t.id) === tplId);
@@ -178,7 +178,8 @@ async function candidatePage(ctx) {
       const values = { first_name: firstName(person.name), role_title: app.role_title, rep_name: ctx.user.name || ctx.user.email };
       const s = applyMergeFields(tpl.subject, values);
       const b = applyMergeFields(tpl.body, values);
-      draft = { subject: s.text, body: b.text, templateId: tpl.id, unknown: [...new Set([...s.unknown, ...b.unknown])] };
+      const d = resolveDocuments(parseDocuments(tpl.attachments_json), values);
+      draft = { subject: s.text, body: bodyWithDocuments(b.text, d.docs), templateId: tpl.id, unknown: [...new Set([...s.unknown, ...b.unknown, ...d.unknown])], docs: d.docs };
     }
   }
   const linkedin = person.linkedin_url;
@@ -323,6 +324,10 @@ async function candidatePage(ctx) {
             </select>
             <button type="submit" class="btn btn-secondary">Load template</button>
           </form>
+          ${draft.docs.length
+            ? html`<div class="doc-note" id="doc-note"><p>This template added ${draft.docs.length === 1 ? 'a linked document' : `${draft.docs.length} linked documents`} to the end of the message. Delete a line from the message if you do not want to send it.</p>
+                <ul>${draft.docs.map((d) => html`<li>${d.name}</li>`)}</ul></div>`
+            : ''}
           ${draft.unknown.length
             ? html`<p class="flash flash-error" id="merge-warning" role="alert">Unknown merge field${draft.unknown.length > 1 ? 's' : ''}: ${draft.unknown.map((u) => `{{${u}}}`).join(', ')}. Fix ${draft.unknown.length > 1 ? 'them' : 'it'} before sending.</p>`
             : ''}
@@ -331,7 +336,7 @@ async function candidatePage(ctx) {
             <input type="hidden" name="template_id" value="${draft.templateId}">
             <p class="composer-to">To: ${person.email}. The email is written and sent from your own mail account. Recruit only logs that you opened it.</p>
             <div class="field"><label for="f-subject">Subject</label><input type="text" id="f-subject" name="subject" maxlength="${LIMITS.subject}" value="${draft.subject}" required></div>
-            <div class="field"><label for="f-body">Message</label><textarea name="body" id="f-body" rows="10" maxlength="${LIMITS.body}" required>${draft.body}</textarea></div>
+            <div class="field"><label for="f-body">Message</label><textarea name="body" id="f-body" rows="${draft.docs.length ? 13 + draft.docs.length : 10}" maxlength="${LIMITS.body}" required>${draft.body}</textarea></div>
             <div class="form-actions">
               <button type="submit" name="via" value="gmail" class="btn btn-primary">Open in Gmail</button>
               <button type="submit" name="via" value="mailto" class="btn btn-secondary">Open in mail app</button>

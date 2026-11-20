@@ -11,6 +11,7 @@ const { SAMPLE_DOMAIN } = require('../lib/sample');
 const { normaliseEmail } = require('../lib/auth');
 const { notifyNewApplication } = require('../lib/notify');
 const qn = require('../lib/questionnaires');
+const { normaliseUrl } = require('../lib/urls');
 
 const LIMITS = { name: 200, email: 254, linkedin: 2000, resume: 2000, links: 2000, answer: 5000, source: 100 };
 const RATE_LIMIT = 10; // stored applications / honeypot hits per IP
@@ -200,25 +201,6 @@ function applyFormPage(ctx, role, { values = {}, errors = {}, status = 200 } = {
       </form>
       </section>`,
   });
-}
-
-// Accepts "https://x" or a bare "example.com/x" (https:// is added). http:// and every other scheme
-// (javascript:, data:, ftp:, ...) is refused. Returns '' for empty input and null for an invalid URL.
-function normaliseUrl(value) {
-  let v = String(value || '').trim();
-  if (!v) return '';
-  if (/^[/\\]|\s/.test(v)) return null;
-  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(v);
-  const hostAndPort = /^[^/?#:@]+:\d+([/?#]|$)/.test(v); // "example.com:8080/x" is a host, not a scheme
-  if (hasScheme && !hostAndPort && !/^https:\/\//i.test(v)) return null;
-  if (!hasScheme || hostAndPort) v = `https://${v}`;
-  try {
-    const u = new URL(v);
-    if (u.protocol === 'https:' && u.hostname.includes('.') && !u.username && !u.password) return u.toString();
-  } catch {
-    /* invalid */
-  }
-  return null;
 }
 
 // A plain address: one @, a local part of letters, digits and . _ + - (no leading, trailing or doubled dot), and a

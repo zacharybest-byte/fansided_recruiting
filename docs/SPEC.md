@@ -165,7 +165,7 @@ Integer `id INTEGER PRIMARY KEY AUTOINCREMENT` (ids are never reused); timestamp
   written by an older deployment after the migration.
 - **application_events**: as v1 (append-only trigger refusing UPDATE)
 - **notes**: as v1.1 (with `role_id`)
-- **email_templates**: as v1 (4 seeded templates)
+- **email_templates**: as v1 (4 seeded templates), plus `attachments_json TEXT NOT NULL DEFAULT '[]'` (2.4.0): JSON `[{"name", "url"}]`, up to 5 linked documents
 - **emails_sent**: `person_id`, `application_id`, `role_id`, `template_id` (nullable), `sender_user_id`,
   `to_email`, `subject`, `body`, `via` (gmail|mailto), `sent_at`. A row means "the rep opened a compose
   window with this text", not "delivered".
@@ -365,6 +365,15 @@ read-only preview of the saved selection, links "Edit this questionnaire" / "Man
 unknown id is an inline error. Roles list shows the questionnaire. Public apply form and the `qv` fingerprint use the questionnaire's questions;
 answers snapshot the question text. `job_roles.questions_json` is legacy storage, written as a copy for rollback, repaired at start-up (see NOTES 2.3.0).
 Migration 4 is additive with a tripwire. Tests: `test/questionnaires.test.js`, `test/migration-questionnaires.test.js` (both drivers).
+
+## 10c. Linked documents on email templates (2.4.0)
+
+The app never sends mail and a draft URL cannot carry files, so a template can carry up to 5 named links ("linked documents") that are added to the email body.
+- Template form (admin only): a "Linked documents" section with 5 rows, Name (up to 80 characters) and Link (https only, up to 500, checked and normalised by `normaliseUrl`, the same helper the apply form uses; a bare `example.com/x` becomes `https://example.com/x`). A row needs both fields or neither; blank rows are skipped; the same link twice is refused; a sixth row is never read. Order is kept. Errors use the error-summary pattern with an inline message per row. The templates list has a "Linked documents" count column.
+- Composer: loading a template appends to its body a blank line and then `Documents:` followed by one `- <Name>: <URL>` line per document. It is ordinary text in the message box, so the rep can delete a line before opening the draft. A note under the template picker lists the documents the template added. Merge fields work in names, never in URLs.
+- Limit: the 4,000-character draft limit includes the block. The template form refuses a body that, with the block, could exceed it (merge fields are counted at 40 characters for first name, 100 for role title, 60 for rep name). The composer still enforces 4,000 on the final text.
+- Activity stores the final body as sent to the draft, so the links that went out are on record; it is shown as plain text (escaped, not auto-linked).
+- Migration 5 is one additive `ALTER TABLE email_templates ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'`. Seeded templates have no documents. Tests: `test/linked-documents.test.js` (both drivers).
 
 ## 11. Not in v2 (later)
 

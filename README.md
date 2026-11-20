@@ -2,7 +2,7 @@
 
 FanSided's in-house tool for onboarding reps: post contributor roles, collect applications, move candidates
 through a pipeline you shape per role (always New first, Onboarded and Passed last; Reviewing and Trial by default), email them from your own Gmail, export to CSV.
-One Node function on Vercel, one Turso database, zero npm dependencies. Version 2.3.0.
+One Node function on Vercel, one Turso database, zero npm dependencies. Version 2.4.0.
 
 ## Deploy in 5 steps
 
